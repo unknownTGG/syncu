@@ -8,22 +8,13 @@ A Syncaila-style automatic multicam and multi-recorder audio sync that runs insi
 - Personal use: sideloaded with the UXP Developer Tool, no licensing
 - Built by GitHub Actions in a private repo; you download a ready-to-load package
 
-## Architecture
+## Architecture (as built in v0.1)
 ```
-┌──────────────── Premiere Pro ────────────────┐
-│  UXP panel (HTML/JS)                          │
-│   • pick input: bins / timeline tracks / auto │
-│   • choose output mode per project            │
-│   • Review panel for low-confidence matches   │
-│   • builds sequences via SequenceEditor API   │
-│            │ require("syncengine.uxpaddon")   │
-│  Native engine (C++, FFmpeg libs, FFT)        │
-│   • decode audio from any camera/recorder file│
-│   • find offsets (sample-accurate)            │
-│   • measure drift and plan re-align cuts      │
-│   • confidence score + alternative matches    │
-└───────────────────────────────────────────────┘
+Premiere Pro ── Syncu panel (UXP, plain JS) ──HTTP 127.0.0.1:47800──▶ Syncu Helper (C++)
 ```
+- **Why a helper instead of a hybrid `.uxpaddon`:** Adobe requires Mac add-ons to be signed and notarized with a paid Apple Developer ID, and the hybrid SDK sits behind the Adobe Developer Console. The helper needs neither, and it works on Premiere 25.6+.
+- The helper auto-starts at login (LaunchAgent on Mac, Startup entry on Windows) and listens on localhost only. It requires an `X-Syncu` header, and requests can't choose the executable it runs.
+- If you get an Apple Developer ID later, the same engine (`syncu_core`) can be wrapped as an add-on.
 
 ## Sync engine (accuracy: sub-frame plus drift)
 1. **Decode**: FFmpeg reads the audio from MOV/MP4/MXF/WAV/BWF (including multi-file recorders) and makes a mono mix (or the best channel), with polarity-inversion handling.
@@ -58,7 +49,8 @@ A Syncaila-style automatic multicam and multi-recorder audio sync that runs insi
 2. **Moving existing clips**: there is no documented move action. "Sync in place" would use clone-at-offset plus `createRemoveItemsAction`. Output modes that build new sequences avoid the problem.
 3. **Multicam source sequence**: there is no API to create one. "Multicam-ready" builds the aligned sequence, then you run Create Multi-Camera Source Sequence from it (one right-click).
 4. **Track creation**: there is no addTrack call. Tracks are created by inserting past the last track index (documented behavior).
-5. **Hybrid add-on toolchain**: needs the Adobe hybrid SDK from the Developer Console. CI may need that SDK supplied as a repo secret or artifact.
+5. **Hybrid add-on toolchain**: avoided in v0.1 (see Architecture).
+6. **Trimming drift pieces**: done by staging the full clip on a scratch track, trimming its in/out points, and cloning the piece onto its real track. The self-test verifies each step.
 
 ## Milestones
 1. Spike: a UXP panel that lists the selected bin and places one clip at a sub-frame time, plus a native add-on hello-world built by CI.
