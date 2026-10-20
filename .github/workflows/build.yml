@@ -1,0 +1,76 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon
+            name: mac-arm64
+          - os: windows-latest
+            name: win-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps (mac)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg
+          pip install numpy
+
+      - name: Install test deps (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-dl
+          $bin = (Get-ChildItem ffmpeg-dl -Recurse -Filter ffmpeg.exe | Select-Object -First 1).DirectoryName
+          echo "$bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "FFMPEG_BIN=$bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          pip install numpy
+
+      - name: Build engine
+        run: |
+          cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build engine/build --config Release --parallel
+
+      - name: Engine tests
+        shell: bash
+        run: |
+          ENGINE=engine/build/syncu-engine
+          [ -f engine/build/Release/syncu-engine.exe ] && ENGINE=engine/build/Release/syncu-engine.exe
+          SYNCU_ENGINE=$ENGINE python engine/tests/run_tests.py
+
+      - name: Planner tests
+        run: node plugin/tests/plan.test.js
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/Syncu/helper
+          cp -R plugin dist/Syncu/plugin
+          rm -rf dist/Syncu/plugin/tests
+          cp scripts/* dist/Syncu/
+          cp README.md dist/Syncu/
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp engine/build/Release/syncu-engine.exe dist/Syncu/helper/
+            cp "$FFMPEG_BIN/ffmpeg.exe" dist/Syncu/helper/
+          else
+            cp engine/build/syncu-engine dist/Syncu/helper/
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Syncu-${{ matrix.name }}
+          path: dist/Syncu

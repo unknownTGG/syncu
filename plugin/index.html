@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Syncu</h1>
+    <span id="engineStatus" class="pill">engine: checking…</span>
+  </header>
+
+  <section>
+    <h2>1 · Source</h2>
+    <label class="radio"><input type="radio" name="source" value="bins" checked /> Selected bin(s) — one bin per camera/recorder</label>
+    <label class="radio"><input type="radio" name="source" value="auto" /> Selected bin(s) — auto-detect devices</label>
+    <label class="radio"><input type="radio" name="source" value="timeline" /> Active timeline — one track per device</label>
+    <button id="scanBtn">Scan</button>
+    <div id="deviceList" class="list"></div>
+  </section>
+
+  <section>
+    <h2>2 · Output</h2>
+    <select id="outputMode">
+      <option value="timeline">Synced timeline (all devices, one sequence)</option>
+      <option value="multicam">Multicam-ready (one source sequence per scene)</option>
+      <option value="takes">Per-take sequences + master timeline</option>
+    </select>
+    <label class="check"><input type="checkbox" id="muteScratch" checked /> Mute camera scratch audio</label>
+    <details>
+      <summary>Advanced</summary>
+      <label>Drift tolerance (ms) <input id="driftTol" type="number" value="2" step="0.5" min="0.25" /></label>
+      <label>Auto-accept confidence <input id="autoConf" type="number" value="0.5" step="0.05" min="0" max="1" /></label>
+      <label>Search accuracy
+        <select id="coarseRate">
+          <option value="1000">Fast</option>
+          <option value="2000" selected>Normal</option>
+          <option value="4000">High</option>
+        </select>
+      </label>
+    </details>
+  </section>
+
+  <section>
+    <h2>3 · Sync</h2>
+    <button id="analyzeBtn" class="primary" disabled>Analyze</button>
+    <div id="progress" class="progress hidden"><div id="progressBar"></div><span id="progressText"></span></div>
+    <div id="summary"></div>
+  </section>
+
+  <section id="reviewSection" class="hidden">
+    <h2>4 · Review</h2>
+    <p class="hint">These need a look. Pick a candidate or nudge, then Re-analyze.</p>
+    <div id="reviewList" class="list"></div>
+    <button id="reanalyzeBtn">Re-analyze with my fixes</button>
+  </section>
+
+  <section>
+    <button id="buildBtn" class="primary" disabled>Build in Premiere</button>
+  </section>
+
+  <section>
+    <details>
+      <summary>Diagnostics</summary>
+      <button id="selfTestBtn">Run Premiere API self-test</button>
+      <button id="copyLogBtn">Copy log</button>
+      <pre id="log"></pre>
+    </details>
+  </section>
+
+  <script src="js/engine.js"></script>
+  <script src="js/devices.js"></script>
+  <script src="js/premiere.js"></script>
+  <script src="js/build.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

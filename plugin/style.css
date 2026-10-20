@@ -1,0 +1,32 @@
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 12px;
+  color: var(--uxp-host-text-color, #ddd);
+  background: var(--uxp-host-background-color, #232323);
+  margin: 0;
+  padding: 8px 10px 16px;
+}
+header { display: flex; align-items: center; justify-content: space-between; }
+h1 { font-size: 16px; margin: 4px 0; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.7; margin: 14px 0 6px; }
+section { border-bottom: 1px solid rgba(128, 128, 128, 0.25); padding-bottom: 8px; }
+label { display: block; margin: 4px 0; }
+label input[type="number"], label input[type="text"], label select { width: 100%; margin-top: 2px; }
+select, button { width: 100%; margin: 4px 0; }
+button.primary { font-weight: 600; }
+.pill { font-size: 10px; padding: 2px 6px; border-radius: 8px; background: rgba(128, 128, 128, 0.25); }
+.pill.ok { background: #2d6a3e; }
+.pill.bad { background: #8a2e2e; }
+.list { max-height: 220px; overflow-y: auto; margin-top: 4px; }
+.row { padding: 4px 6px; margin: 2px 0; border-radius: 4px; background: rgba(128, 128, 128, 0.12); }
+.row .title { font-weight: 600; }
+.row .meta { opacity: 0.7; font-size: 11px; }
+.row.warn { border-left: 3px solid #d9a030; }
+.row.err { border-left: 3px solid #d04040; }
+.row.ok { border-left: 3px solid #40a060; }
+.progress { position: relative; height: 16px; background: rgba(128, 128, 128, 0.2); border-radius: 4px; margin: 6px 0; overflow: hidden; }
+#progressBar { height: 100%; width: 0%; background: #3d7bd9; }
+#progressText { position: absolute; left: 6px; top: 1px; font-size: 11px; }
+.hidden { display: none; }
+.hint { opacity: 0.7; margin: 2px 0 6px; }
+pre#log { white-space: pre-wrap; font-size: 10px; max-height: 240px; overflow-y: auto; background: rgba(0, 0, 0, 0.25); padding: 6px; }
