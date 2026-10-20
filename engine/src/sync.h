@@ -1,4 +1,6 @@
 #pragma once
+#include <complex>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -7,6 +9,14 @@ namespace syncu {
 // Sign convention everywhere: offset = (time in A) - (time in B) for the
 // same sound, i.e. B starts `offset` seconds after A starts. Placing B on
 // the timeline at A.start + offset puts them in sync.
+
+// Caches the spectrum of a long file so matching many clips against it
+// transforms it once. Thread-safe; holds one FFT size.
+struct SpectrumCache {
+  std::mutex mu;
+  size_t n = 0;
+  std::vector<std::complex<float>> spec;
+};
 
 struct Candidate {
   double offset = 0.0;  // seconds
@@ -21,6 +31,9 @@ struct MatchOptions {
   double minOverlap = 2.0;    // seconds; shorter overlaps are rejected
   int channelA = -1, channelB = -1;
   int maxCandidates = 5;
+  // Skip the (costly, decode-heavy) fine step when the coarse match alone
+  // already scores below this; such pairs are rejected anyway.
+  float refineMinCoarse = 0.08f;
 };
 
 struct MatchResult {
@@ -37,9 +50,13 @@ struct MatchResult {
 };
 
 // Pure-signal versions (used by tests and by callers that already decoded).
+// `a` and `b` should already have their DC removed (see removeDc).
 std::vector<Candidate> coarseSearch(const std::vector<float>& a,
                                     const std::vector<float>& b, int rate,
-                                    double minOverlap, int maxCandidates);
+                                    double minOverlap, int maxCandidates,
+                                    SpectrumCache* cacheA = nullptr);
+
+void removeDc(std::vector<float>& x);
 
 // Refine around `guess`, given decoded segments: `aSeg` starts at aStart
 // seconds in A, `bSeg` starts at bStart seconds in B. Returns the refined
@@ -58,7 +75,8 @@ MatchResult matchFiles(const std::string& a, const std::string& b,
 MatchResult matchDecoded(const std::string& a, const std::string& b,
                          const std::vector<float>& coarseA,
                          const std::vector<float>& coarseB,
-                         const MatchOptions& opts);
+                         const MatchOptions& opts,
+                         SpectrumCache* cacheA = nullptr);
 
 struct DriftPoint {
   double timeB;   // seconds into B (window centre)

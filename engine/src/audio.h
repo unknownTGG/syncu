@@ -21,6 +21,13 @@ const std::string& ffmpegPath();
 // Throws std::runtime_error on failure.
 std::vector<float> decodeAudio(const std::string& path, const DecodeOptions& opts);
 
+// Time of the first video frame on the file's timeline (seconds), 0 for
+// audio-only files. Premiere's clip time zero is this frame.
+double videoStartTime(const std::string& path);
+
+// First line of `ffmpeg -version`, or "" if ffmpeg can't be run.
+std::string ffmpegVersion();
+
 // Duration of the first audio stream in seconds (via a fast decode probe).
 double probeDuration(const std::string& path);
 

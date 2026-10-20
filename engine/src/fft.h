@@ -19,4 +19,12 @@ size_t nextPow2(size_t n);
 std::vector<float> crossCorrelate(const std::vector<float>& a,
                                   const std::vector<float>& b, bool phat);
 
+// Zero-padded forward FFT of x at size n.
+std::vector<cfloat> spectrum(const std::vector<float>& x, size_t n);
+
+// Same as crossCorrelate, with a's spectrum precomputed at size
+// nextPow2(lenA + b.size() - 1) (lets a long file be transformed once).
+std::vector<float> crossCorrelateSpec(const std::vector<cfloat>& specA, size_t lenA,
+                                      const std::vector<float>& b, bool phat);
+
 }  // namespace syncu

@@ -60,14 +60,18 @@
   </section>
 
   <section>
+    <h2>Report a problem</h2>
+    <button id="copyReportBtn">Copy report for Claude</button>
+    <button id="saveReportBtn">Save report…</button>
+    <div id="reportStatus" class="hint"></div>
     <details>
       <summary>Diagnostics</summary>
       <button id="selfTestBtn">Run Premiere API self-test</button>
-      <button id="copyLogBtn">Copy log</button>
       <pre id="log"></pre>
     </details>
   </section>
 
+  <script src="js/log.js"></script>
   <script src="js/engine.js"></script>
   <script src="js/devices.js"></script>
   <script src="js/premiere.js"></script>

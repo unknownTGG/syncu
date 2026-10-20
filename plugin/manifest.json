@@ -1,7 +1,7 @@
 {
   "id": "com.syncu.panel",
   "name": "Syncu",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "main": "index.html",
   "manifestVersion": 5,
   "host": [
@@ -13,11 +13,9 @@
   "requiredPermissions": {
     "localFileSystem": "fullAccess",
     "network": {
-      "domains": [
-        "http://127.0.0.1:47800",
-        "http://localhost:47800"
-      ]
-    }
+      "domains": "all"
+    },
+    "clipboard": "readAndWrite"
   },
   "entrypoints": [
     {

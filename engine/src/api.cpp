@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include "audio.h"
+#include "log.h"
 
 namespace syncu {
 
@@ -101,6 +102,7 @@ std::string analyzeJson(const std::string& request, const ProgressFn& progress) 
     out["edges"] = je;
     return out.dump();
   } catch (const std::exception& e) {
+    logError(std::string("analyze request failed: ") + e.what());
     return json{{"ok", false}, {"error", e.what()}}.dump();
   }
 }

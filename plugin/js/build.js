@@ -63,7 +63,7 @@ Syncu.build = (() => {
         if (segs.length > 1) warnings.push(`${c.name}: video drifts ${r.driftPpm.toFixed(1)} ppm; aligned at its middle`);
       }
       comps.get(r.component).push({
-        id: r.id, clip: c, isVideo: c.isVideo, segs, vpos,
+        id: r.id, clip: c, isVideo: c.isVideo, segs, vpos, review: !!r.needsReview, method: r.method,
         start: segs[0].pos, end: segs[segs.length - 1].pos + (segs[segs.length - 1].srcOut - segs[segs.length - 1].srcIn),
       });
     }
@@ -163,11 +163,20 @@ Syncu.build = (() => {
         });
         if (!muteTracks.includes(scratchBase + track)) muteTracks.push(scratchBase + track);
       }
+      // Flag clips that need a human look (timestamp-placed etc.).
+      const markers = [];
+      const flagged = new Set();
+      for (const p of placements) {
+        const it = items.find((i) => i.id === p.clipId);
+        if (!it || !it.review || flagged.has(it.id)) continue;
+        flagged.add(it.id);
+        markers.push({ name: `Syncu: check ${it.clip.name}`, time: p.pos, comment: `placed by ${it.method}; verify sync` });
+      }
       const settingsClipId = vPlacements.length
         ? vPlacements.reduce((a, b) => (b.item.end - b.item.start > a.item.end - a.item.start ? b : a)).item.id
         : placements[0] && placements[0].clipId;
       return {
-        name, placements, settingsClipId,
+        name, placements, settingsClipId, markers,
         muteTracks: opts.muteScratch === false ? [] : muteTracks.sort((a, b) => a - b),
         stagingTrack: scratchBase + nextV + 1,
       };
@@ -196,7 +205,12 @@ Syncu.build = (() => {
         segs: it.segs.map((s) => ({ ...s, pos: s.pos + it._off })),
         start: it.start + it._off, end: it.end + it._off,
       }));
-      sequences.push(makeSequence(`${label} - synced`, shifted, 0));
+      const seqPlan = makeSequence(`${label} - synced`, shifted, 0);
+      compIds.forEach((c, n) => {
+        const t = Math.min(...shifted.filter((i) => i.clip && comps.get(c).some((x) => x.id === i.id)).map((i) => i.start));
+        if (compIds.length > 1 && isFinite(t)) seqPlan.markers.push({ name: `Scene ${n + 1}`, time: t, comment: "" });
+      });
+      sequences.push(seqPlan);
     } else if (opts.mode === "multicam") {
       compIds.forEach((c, n) => {
         const items = comps.get(c);
@@ -244,6 +258,7 @@ Syncu.build = (() => {
   // duration is known (from the first sequence Premiere creates).
   async function executePlan(plan, clips, onStep, replan) {
     const pp = Syncu.pp;
+    const log = (...a) => Syncu.log(...a);
     const proj = await pp.project();
     const byId = new Map(clips.map((c) => [c.id, c]));
     const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
@@ -259,12 +274,20 @@ Syncu.build = (() => {
       if (si === 0 && replan) {
         const ft = await pp.frameTicks(seq);
         if (ft && ft !== plan.frameTicks) {
+          log(`sequence frame is ${ft} ticks (planned with ${plan.frameTicks}); re-planning`);
           plan = replan(ft);
           sp = plan.sequences[0];
         }
       }
-      // Video+audio and whole audio clips: one undo step per batch.
+      // Tracks first, in order (Premiere appends new tracks at the end).
+      const nV = Math.max(1, ...sp.placements.filter((p) => p.kind === "av").map((p) => p.videoTrack + 1));
+      const nA = Math.max(sp.stagingTrack + 1, ...sp.placements.map((p) => p.audioTrack + 1));
+      const firstAudio = sp.placements.find((p) => p.kind === "audio");
+      await pp.ensureTracks(proj, seq, nV, nA, settings.projectItem, firstAudio ? byId.get(firstAudio.clipId).projectItem : null);
+
+      // Video+audio and whole audio clips: one undo step.
       const simple = sp.placements.filter((p) => p.kind === "av" || p.whole);
+      log(`"${sp.name}": placing ${simple.length} clip(s), ${sp.placements.length - simple.length} trimmed piece(s)`);
       pp.transact(proj, `Syncu: place clips (${sp.name})`, () =>
         simple.map((p) =>
           p.kind === "av"
@@ -274,6 +297,16 @@ Syncu.build = (() => {
       );
       step += simple.length;
       if (onStep) onStep(step / total, sp.name);
+
+      // Check a few placements landed where planned.
+      for (const p of simple.slice(0, 8)) {
+        const items = p.kind === "av" ? await pp.trackItemsOn(seq, "video", p.videoTrack) : await pp.trackItemsOn(seq, "audio", p.audioTrack);
+        const want = p.kind === "av" ? p.pos : p.pos - p.srcIn;
+        let best = Infinity;
+        for (const ti of items) best = Math.min(best, Math.abs(pp.seconds(await ti.getStartTime()) - want));
+        if (best > 0.0005) log("warn", `${p.name}: expected at ${want.toFixed(4)} on ${p.kind === "av" ? "V" + (p.videoTrack + 1) : "A" + (p.audioTrack + 1)}, nearest clip is ${(best * 1000).toFixed(2)} ms away`);
+      }
+
       // Drift-cut / take-trimmed audio pieces.
       for (const p of sp.placements.filter((x) => x.kind === "audio" && !x.whole)) {
         await pp.placeAudioPiece(proj, seq, byId.get(p.clipId).projectItem, p.srcIn, p.srcOut, p.pos, p.audioTrack, sp.stagingTrack);
@@ -284,9 +317,10 @@ Syncu.build = (() => {
         try {
           await pp.muteAudioTrack(seq, t);
         } catch (e) {
-          /* muting is cosmetic */
+          log("warn", `could not mute A${t + 1}: ${Syncu.log.errText(e)}`);
         }
       }
+      await pp.addMarkers(proj, seq, sp.markers || []);
       made.push(seq);
     }
 
@@ -294,17 +328,17 @@ Syncu.build = (() => {
       try {
         const first = byId.get(plan.sequences[0].settingsClipId);
         const master = await pp.createSequence(proj, plan.master.name, first.projectItem, bin);
+        const ft = (await pp.frameTicks(master)) || plan.frameTicks;
+        const entries = [];
         let cursor = 0;
-        const actions = [];
         for (const seq of made) {
-          const pi = await seq.getProjectItem();
-          actions.push(pp.overwriteAction(master, pi, cursor, 0, 0));
-          const end = pp.seconds(await seq.getEndTime());
-          cursor = Math.ceil(end + 2);
+          entries.push({ pi: await seq.getProjectItem(), at: cursor });
+          cursor = ceilFrame(pp.seconds(await seq.getEndTime()) + cursor + 2, ft);
         }
-        pp.transact(proj, "Syncu: master timeline", () => actions);
+        pp.transact(proj, "Syncu: master timeline", () => entries.map((e) => pp.overwriteAction(master, e.pi, e.at, 0, 0)));
+        log(`master timeline: ${entries.length} take(s) nested`);
       } catch (e) {
-        Syncu.log(`warn: master timeline not built (${e.message || e})`);
+        log("warn", `master timeline not built: ${Syncu.log.errText(e)}`);
       }
     }
     return made;

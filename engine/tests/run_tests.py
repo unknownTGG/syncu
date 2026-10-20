@@ -95,13 +95,27 @@ def write_cam(path, x, codec="aac"):
                     "-c:a", codec, "-b:a", "192k", path], input=pcm, check=True)
 
 
+def write_cam_offset_audio(path, x, audio_delay):
+    """Camera file whose audio stream starts `audio_delay` s after the video
+    (some cameras do this); PCM in MOV so there's no codec priming."""
+    dur = len(x) / SR + audio_delay
+    pcm = (np.clip(x, -1, 1) * 32767).astype("<i2").tobytes()
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", f"color=c=gray:s=160x90:r=25:d={dur}",
+                    "-itsoffset", str(audio_delay),
+                    "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "-",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "pcm_s16le", path],
+                   input=pcm, check=True)
+
+
 def engine(*args):
     r = subprocess.run([ENGINE, *args], capture_output=True, text=True, check=True)
     return json.loads(r.stdout)
 
 
 def main():
-    d = tempfile.mkdtemp(prefix="syncu-test-")
+    d = os.environ.get("SYNCU_TEST_MEDIA") or tempfile.mkdtemp(prefix="syncu-test-")
+    os.makedirs(d, exist_ok=True)
     print("media in", d)
 
     scene = speechlike(700)  # the "true" sound in the room, 700 s
@@ -161,6 +175,10 @@ def main():
         p = f"{d}/camB_{i}.mp4"
         write_cam(p, room(frac_shift(scene, 0.25)[s * SR:(s + ln) * SR], 10))
         add(f"B{i}", p, "camB", s - 0.25 / SR, isVideo=True, timestamp=1.7e9 + s)
+    # Camera B clip whose audio stream starts 0.2 s after its video: in
+    # Premiere its time zero is the first video frame, 0.2 s before the audio.
+    write_cam_offset_audio(f"{d}/camB_off.mov", room(scene[600 * SR:640 * SR], 10), 0.2)
+    add("Boff", f"{d}/camB_off.mov", "camB", 600.0 - 0.2, isVideo=True, timestamp=1.7e9 + 600)
     # Silent clip on camera B, recorded at scene time 400 s (timestamp only).
     write_cam(f"{d}/camB_silent.mp4", np.zeros(20 * SR))
     add("Bsilent", f"{d}/camB_silent.mp4", "camB", 400.0, isVideo=True,
@@ -180,7 +198,7 @@ def main():
     check("analyze/ok", res.get("ok"), res.get("error", ""))
     by = {c["id"]: c for c in res["clips"]}
     a0 = by["A1"]["position"]
-    for cid in ["B0", "B1", "B2", "B3", "B4"]:
+    for cid in ["B0", "B1", "B2", "B3", "B4", "Boff"]:
         c = by[cid]
         rel = c["segments"][0]["position"] - c["segments"][0]["start"] - a0
         err = abs(rel - truth[cid])

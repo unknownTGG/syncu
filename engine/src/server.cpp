@@ -14,6 +14,7 @@
 
 #include "api.h"
 #include "audio.h"
+#include "log.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -34,7 +35,7 @@ namespace syncu {
 
 namespace {
 
-const char* kVersion = "0.1.0";
+const char* kVersion = "0.1.1";
 
 struct Job {
   std::atomic<double> progress{0.0};
@@ -132,7 +133,18 @@ void handle(sock_t s) {
     if (req.headers["x-syncu"] != "1") {
       respond(s, 403, R"({"ok":false,"error":"missing X-Syncu header"})");
     } else if (req.method == "GET" && req.path == "/health") {
-      respond(s, 200, json{{"ok", true}, {"version", kVersion}, {"ffmpeg", ffmpegPath()}}.dump());
+      static const std::string ffv = ffmpegVersion();
+#if defined(_WIN32)
+      const char* os = "windows";
+#elif defined(__APPLE__)
+      const char* os = "macos";
+#else
+      const char* os = "linux";
+#endif
+      respond(s, 200, json{{"ok", true}, {"version", kVersion}, {"ffmpeg", ffmpegPath()},
+                           {"ffmpegVersion", ffv}, {"os", os}}.dump());
+    } else if (req.method == "GET" && req.path == "/log") {
+      respond(s, 200, json{{"ok", true}, {"lines", recentLog(1500)}}.dump());
     } else if (req.method == "POST" && req.path == "/analyze") {
       std::string body = sanitize(req.body);
       auto job = std::make_shared<Job>();
@@ -142,13 +154,15 @@ void handle(sock_t s) {
         id = g_nextJob++;
         g_jobs[id] = job;
       }
-      std::thread([job, body] {
+      logInfo("job " + std::to_string(id) + " started (" + std::to_string(body.size()) + " bytes)");
+      std::thread([job, body, id] {
         job->result = analyzeJson(body, [job](double f, const std::string& m) {
           job->progress = f;
           std::lock_guard<std::mutex> l(job->mu);
           job->message = m;
         });
         job->done = true;
+        logInfo("job " + std::to_string(id) + " finished");
       }).detach();
       respond(s, 200, json{{"ok", true}, {"job", id}}.dump());
     } else if (req.method == "GET" && req.path == "/job") {
@@ -179,6 +193,7 @@ void handle(sock_t s) {
       respond(s, 404, R"({"ok":false,"error":"not found"})");
     }
   } catch (const std::exception& e) {
+    logError(req.method + " " + req.path + ": " + e.what());
     respond(s, 400, json{{"ok", false}, {"error", e.what()}}.dump());
   }
   CLOSESOCK(s);
@@ -204,8 +219,8 @@ int runServer(int port) {
     return 1;
   }
   listen(ls, 16);
-  std::fprintf(stderr, "Syncu helper %s listening on 127.0.0.1:%d (ffmpeg: %s)\n",
-               kVersion, port, ffmpegPath().c_str());
+  logInfo(std::string("Syncu helper ") + kVersion + " listening on 127.0.0.1:" +
+          std::to_string(port) + " (ffmpeg: " + ffmpegPath() + ", " + ffmpegVersion() + ")");
   for (;;) {
     sock_t c = accept(ls, nullptr, nullptr);
     if (c == INVALID_SOCKET) continue;

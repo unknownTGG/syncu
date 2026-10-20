@@ -26,7 +26,7 @@ The heavy lifting runs in a small native helper so it's fast and identical on Ma
 
 1. Install FFmpeg: `brew install ffmpeg` (get Homebrew from https://brew.sh).
 2. Download the latest **Syncu-mac-arm64** artifact from the repo's *Actions* tab and unzip it.
-3. Double-click `install-mac.command`. If macOS blocks it: right-click → Open. This installs the helper and starts it at every login.
+3. Open **Terminal**, type `bash ` (with a space), drag `install-mac.command` into the window, press Enter. This installs the helper and starts it at every login. (Running it via `bash` sidesteps macOS blocking downloaded scripts.)
 4. Install the **UXP Developer Tool** from Creative Cloud. Click *Add Plugin*, pick `plugin/manifest.json`, then *Load*.
 5. In Premiere: *Window → UXP Plugins → Syncu*. The pill at the top should turn green.
 
@@ -53,6 +53,18 @@ Multi-file recorders (Zoom `ZOOM0001_Tr1.WAV`, `_Tr2`, `_LR`, F-series, Tascam) 
 - Video can only sit on frame boundaries. The longest camera of each scene is placed exactly; other cameras are snapped to the nearest frame. That's at most ½ frame of picture offset, which no NLE can avoid. Recorder audio keeps its exact position.
 - Drift tolerance defaults to 2 ms (*Advanced*). At a typical 30 ppm, that's one cut every ~2 minutes, placed at the quietest nearby moment.
 
+## Reporting problems
+
+Click **Copy report for Claude** at the bottom of the panel and paste the result into the chat. The report holds:
+- versions, settings and the clip list (home folder shortened to `~`)
+- the analysis results and the build plan
+- the self-test results
+- the last panel and helper logs
+
+**Save report…** writes the same text to a file. The panel also keeps its log in the plugin's data folder, so it survives a reload.
+
+The helper's log can also be read directly: `~/Library/Application Support/Syncu/helper.log` on Mac, or open `http://127.0.0.1:47800/log` with header `X-Syncu: 1`.
+
 ## First run: please do the self-test
 
 Some Premiere UXP calls are thinly documented. Select one video clip and one audio-only clip in the Project panel, then open *Diagnostics → Run Premiere API self-test*. Copy the log and send it back; it says exactly which build steps work on your Premiere version.
@@ -61,8 +73,9 @@ Some Premiere UXP calls are thinly documented. Select one video clip and one aud
 
 ```bash
 cmake -S engine -B engine/build && cmake --build engine/build -j
-SYNCU_ENGINE=engine/build/syncu-engine python3 engine/tests/run_tests.py   # needs ffmpeg + numpy
+SYNCU_ENGINE=engine/build/syncu-engine SYNCU_TEST_MEDIA=/tmp/syncu-media python3 engine/tests/run_tests.py   # needs ffmpeg + numpy
 node plugin/tests/plan.test.js
+(cd plugin/tests/sim && npm install && node run-sim.js /tmp/syncu-media)  # panel + mock Premiere
 engine/build/syncu-engine serve            # run the helper in a terminal
 engine/build/syncu-engine match a.wav b.mp4
 ```

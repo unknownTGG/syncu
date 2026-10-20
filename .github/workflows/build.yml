@@ -45,15 +45,36 @@ jobs:
           cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release
           cmake --build engine/build --config Release --parallel
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Engine tests
         shell: bash
         run: |
-          ENGINE=engine/build/syncu-engine
-          [ -f engine/build/Release/syncu-engine.exe ] && ENGINE=engine/build/Release/syncu-engine.exe
-          SYNCU_ENGINE=$ENGINE python engine/tests/run_tests.py
+          ENGINE=$PWD/engine/build/syncu-engine
+          [ -f engine/build/Release/syncu-engine.exe ] && ENGINE=$PWD/engine/build/Release/syncu-engine.exe
+          # Git Bash paths (/d/a/...) mean nothing to native Windows programs.
+          if command -v cygpath >/dev/null; then ENGINE=$(cygpath -w "$ENGINE"); fi
+          echo "ENGINE=$ENGINE" >> $GITHUB_ENV
+          SYNCU_ENGINE=$ENGINE SYNCU_TEST_MEDIA=$RUNNER_TEMP/syncu-media python engine/tests/run_tests.py
 
       - name: Planner tests
         run: node plugin/tests/plan.test.js
+
+      - name: Panel simulation (mock Premiere + real helper)
+        shell: bash
+        run: |
+          cd plugin/tests/sim && npm install --no-audit --no-fund --silent
+          node run-sim.js "$RUNNER_TEMP/syncu-media" "$ENGINE"
+
+      - name: Upload simulation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-report-${{ matrix.name }}
+          path: ${{ runner.temp }}/syncu-media/sim-report.txt
+          if-no-files-found: ignore
 
       - name: Package
         shell: bash

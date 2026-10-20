@@ -47,17 +47,27 @@ void fft(std::vector<cfloat>& data, bool inverse) {
   }
 }
 
+std::vector<cfloat> spectrum(const std::vector<float>& x, size_t n) {
+  std::vector<cfloat> f(n);
+  for (size_t i = 0; i < x.size() && i < n; ++i) f[i] = x[i];
+  fft(f, false);
+  return f;
+}
+
 std::vector<float> crossCorrelate(const std::vector<float>& a,
                                   const std::vector<float>& b, bool phat) {
   if (a.empty() || b.empty()) return {};
-  const size_t outLen = a.size() + b.size() - 1;
-  const size_t n = nextPow2(outLen);
+  return crossCorrelateSpec(spectrum(a, nextPow2(a.size() + b.size() - 1)), a.size(), b, phat);
+}
 
-  std::vector<cfloat> fa(n), fb(n);
-  for (size_t i = 0; i < a.size(); ++i) fa[i] = a[i];
-  for (size_t i = 0; i < b.size(); ++i) fb[i] = b[i];
-  fft(fa, false);
-  fft(fb, false);
+std::vector<float> crossCorrelateSpec(const std::vector<cfloat>& specA, size_t lenA,
+                                      const std::vector<float>& b, bool phat) {
+  if (lenA == 0 || b.empty()) return {};
+  const size_t outLen = lenA + b.size() - 1;
+  const size_t n = specA.size();
+  std::vector<cfloat> fa(n);
+  std::vector<cfloat> fb = spectrum(b, n);
+  for (size_t i = 0; i < n; ++i) fa[i] = specA[i];
 
   for (size_t i = 0; i < n; ++i) {
     cfloat x = fa[i] * std::conj(fb[i]);
@@ -74,7 +84,7 @@ std::vector<float> crossCorrelate(const std::vector<float>& a,
   std::vector<float> out(outLen);
   const size_t negCount = b.size() - 1;
   for (size_t i = 0; i < negCount; ++i) out[i] = fa[n - negCount + i].real();
-  for (size_t i = 0; i < a.size(); ++i) out[negCount + i] = fa[i].real();
+  for (size_t i = 0; i < lenA; ++i) out[negCount + i] = fa[i].real();
   return out;
 }
 

@@ -16,7 +16,8 @@ add_library(syncu_core STATIC
   src/sync.cpp
   src/project.cpp
   src/api.cpp
-  src/server.cpp)
+  src/server.cpp
+  src/log.cpp)
 target_include_directories(syncu_core PUBLIC src third_party)
 target_link_libraries(syncu_core PUBLIC Threads::Threads)
 if(WIN32)

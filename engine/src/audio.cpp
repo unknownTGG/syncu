@@ -1,13 +1,21 @@
 #include "audio.h"
 
+#include "log.h"
+
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
 #include <stdexcept>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#define pclose _pclose
 #endif
 
 namespace syncu {
@@ -60,10 +68,12 @@ std::vector<float> decodeAudio(const std::string& path, const DecodeOptions& opt
   cmd << " -i " << quote(path);
   if (opts.duration >= 0.0) cmd << " -t " << std::fixed << opts.duration;
   cmd << " -map 0:a:" << opts.stream << " -vn";
-  if (opts.channel >= 0)
-    cmd << " -af " << quote("pan=mono|c0=c" + std::to_string(opts.channel));
-  else
-    cmd << " -ac 1";
+  // aresample first_pts=0 pads silence when the audio stream starts after
+  // the file's time zero, so sample 0 is always container time 0 (or the
+  // -ss position) even for files whose audio is offset from the video.
+  std::string af = "aresample=first_pts=0";
+  if (opts.channel >= 0) af = "pan=mono|c0=c" + std::to_string(opts.channel) + "," + af;
+  cmd << " -af " << quote(af) << " -ac 1";
   cmd << " -ar " << opts.sampleRate << " -f f32le -" << kNullErr;
 
 #ifdef _WIN32
@@ -71,7 +81,6 @@ std::vector<float> decodeAudio(const std::string& path, const DecodeOptions& opt
   // Wide API so non-ASCII file names (é, ü, 日本) survive.
   std::wstring line = widen("\"" + cmd.str() + "\"");
   FILE* pipe = _wpopen(line.c_str(), L"rb");
-#define pclose _pclose
 #else
   std::string line = cmd.str();
   FILE* pipe = popen(line.c_str(), "r");
@@ -84,9 +93,56 @@ std::vector<float> decodeAudio(const std::string& path, const DecodeOptions& opt
   while ((n = fread(buf, sizeof(float), 8192, pipe)) > 0)
     samples.insert(samples.end(), buf, buf + n);
   int status = pclose(pipe);
-  if (status != 0 && samples.empty())
+  if (status != 0 && samples.empty()) {
+    logError("ffmpeg failed (status " + std::to_string(status) + "): " + cmd.str());
     throw std::runtime_error("ffmpeg could not decode audio from: " + path);
+  }
+  if (status != 0)
+    logWarn("ffmpeg exited " + std::to_string(status) + " after " +
+            std::to_string(samples.size()) + " samples: " + path);
   return samples;
+}
+
+double videoStartTime(const std::string& path) {
+  std::ostringstream cmd;
+  cmd << quote(g_ffmpeg) << " -nostdin -hide_banner -i " << quote(path)
+      << " -map 0:v:0 -vf showinfo -frames:v 1 -f null - 2>&1";
+#ifdef _WIN32
+  FILE* pipe = _wpopen(widen("\"" + cmd.str() + "\"").c_str(), L"rb");
+#else
+  FILE* pipe = popen(cmd.str().c_str(), "r");
+#endif
+  if (!pipe) return 0.0;
+  std::string out;
+  char buf[4096];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), pipe)) > 0) out.append(buf, n);
+  pclose(pipe);
+  // First frame line: "[Parsed_showinfo_0 @ ...] n:   0 pts: 0 pts_time:0.04 ..."
+  auto at = out.find("Parsed_showinfo");
+  if (at == std::string::npos) return 0.0;
+  auto pt = out.find("pts_time:", at);
+  if (pt == std::string::npos) return 0.0;
+  double v = std::atof(out.c_str() + pt + 9);
+  if (v != 0.0) logInfo("video starts at " + std::to_string(v) + " s in " + path);
+  return v;
+}
+
+std::string ffmpegVersion() {
+  std::string cmd = quote(g_ffmpeg) + " -version" + kNullErr;
+#ifdef _WIN32
+  FILE* pipe = _wpopen(widen("\"" + cmd + "\"").c_str(), L"rb");
+#else
+  FILE* pipe = popen(cmd.c_str(), "r");
+#endif
+  if (!pipe) return "";
+  char buf[512] = {0};
+  std::string first = fgets(buf, sizeof(buf), pipe) ? buf : "";
+  while (fgets(buf, sizeof(buf), pipe)) {
+  }
+  pclose(pipe);
+  while (!first.empty() && (first.back() == '\n' || first.back() == '\r')) first.pop_back();
+  return first;
 }
 
 double probeDuration(const std::string& path) {

@@ -1,0 +1,8 @@
+{
+  "name": "syncu-sim",
+  "private": true,
+  "description": "End-to-end panel simulation with a mock Premiere",
+  "devDependencies": {
+    "jsdom": "24.1.3"
+  }
+}

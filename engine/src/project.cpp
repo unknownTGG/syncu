@@ -4,13 +4,27 @@
 #include <atomic>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <thread>
 
 #include "audio.h"
+#include "log.h"
+
+#include <chrono>
+#include <cstdio>
 
 #include <sys/stat.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace syncu {
 
@@ -34,8 +48,9 @@ struct Node {
   std::string device;
   bool isVideo = false;
   double duration = 0.0;
-  std::vector<float> coarse;
+  std::vector<float> coarse;    // DC removed
   std::vector<float> envelope;  // 20 Hz RMS, for quiet-spot cut snapping
+  std::unique_ptr<SpectrumCache> spec;  // long files only
 };
 
 struct Obs {  // one offset observation on an edge
@@ -79,14 +94,24 @@ bool solveDense(std::vector<double>& A, std::vector<double>& b, size_t n) {
 // Recording start estimated from the file's modification time: cameras and
 // recorders close the file when recording stops, so start = mtime - duration.
 double fileStartTime(const std::string& path, double duration) {
+  double mtime = -1.0;
 #ifdef _WIN32
-  struct _stat64 st;
-  if (_wstat64(widen(path).c_str(), &st) != 0) return -1.0;
+  WIN32_FILE_ATTRIBUTE_DATA fa;
+  if (!GetFileAttributesExW(widen(path).c_str(), GetFileExInfoStandard, &fa)) return -1.0;
+  ULARGE_INTEGER t;
+  t.LowPart = fa.ftLastWriteTime.dwLowDateTime;
+  t.HighPart = fa.ftLastWriteTime.dwHighDateTime;
+  mtime = double(t.QuadPart) / 1e7 - 11644473600.0;  // 100 ns since 1601 -> Unix
 #else
   struct stat st;
   if (stat(path.c_str(), &st) != 0) return -1.0;
+#ifdef __APPLE__
+  mtime = double(st.st_mtimespec.tv_sec) + st.st_mtimespec.tv_nsec * 1e-9;
+#else
+  mtime = double(st.st_mtim.tv_sec) + st.st_mtim.tv_nsec * 1e-9;
 #endif
-  return double(st.st_mtime) - std::max(0.0, duration);
+#endif
+  return mtime - std::max(0.0, duration);
 }
 
 }  // namespace
@@ -97,6 +122,23 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
   auto report = [&](double f, const std::string& m) {
     if (progress) progress(f, m);
   };
+  using clock = std::chrono::steady_clock;
+  const auto t0 = clock::now();
+  auto elapsed = [&] {
+    char b[32];
+    std::snprintf(b, sizeof(b), "%.1fs", std::chrono::duration<double>(clock::now() - t0).count());
+    return std::string(b);
+  };
+  auto fmt = [](const char* f, double a, double b = 0, double c = 0) {
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), f, a, b, c);
+    return std::string(buf);
+  };
+  logInfo("analyze: " + std::to_string(clips.size()) + " clips, autoConfidence " +
+          fmt("%.2f", opts.autoConfidence) + ", driftTolerance " +
+          fmt("%.1f ms", opts.driftTolerance * 1000) + ", coarseRate " +
+          std::to_string(opts.match.coarseRate) + ", manual edges " +
+          std::to_string(opts.manualEdges.size()));
   AnalyzeResult out;
 
   // ---- 1. Group clips into nodes (one position + clock per node). ----
@@ -124,6 +166,13 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     }
   }
 
+  // Where each video file's first frame sits on its own timeline; analysis
+  // runs on the file timeline, Premiere counts from the first frame.
+  std::vector<double> videoStart(clips.size(), 0.0);
+  parallelFor(clips.size(), opts.threads, [&](size_t i) {
+    if (clips[i].isVideo) videoStart[i] = videoStartTime(clips[i].path);
+  });
+
   // ---- 2. Decode every lead file once at the coarse rate. ----
   std::atomic<size_t> decoded{0};
   std::mutex errMu;
@@ -135,17 +184,43 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
       d.channel = clips[node.lead].channel;
       try {
         node.coarse = decodeAudio(clips[node.lead].path, d);
-      } catch (...) {
+      } catch (const std::exception& e) {
+        logWarn("no usable audio in " + clips[node.lead].path + ": " + e.what());
         node.coarse.clear();  // unreadable audio -> treated as silent
       }
       node.duration = std::max(node.duration,
                                double(node.coarse.size()) / opts.match.coarseRate);
+      removeDc(node.coarse);
       node.envelope = computeEnvelope(node.coarse, opts.match.coarseRate, 0.05);
-      if (node.coarse.size() < size_t(opts.match.minOverlap * opts.match.coarseRate))
+      // Files over 5 minutes get matched against many clips: cache their FFT.
+      if (node.coarse.size() > size_t(300 * opts.match.coarseRate))
+        node.spec = std::make_unique<SpectrumCache>();
+      // A silent track (gimbal/drone with the mic off, or no mic at all)
+      // can't be matched; treat it as no audio so the clip is placed by time.
+      if (!node.coarse.empty()) {
+        double ss = 0.0;
+        for (float x : node.coarse) ss += double(x) * x;
+        const double rms = std::sqrt(ss / double(node.coarse.size()));
+        if (rms < 1e-3) {  // below -60 dBFS
+          logInfo("audio is silent (" + fmt("%.1f dBFS", 20 * std::log10(rms + 1e-12)) +
+                  "), placing by time: " + clips[node.lead].path);
+          node.coarse.clear();
+        }
+      }
+      if (node.coarse.size() < size_t(opts.match.minOverlap * opts.match.coarseRate)) {
+        if (!node.coarse.empty()) logWarn("audio too short to match: " + clips[node.lead].path);
         node.coarse.clear();
+      }
     }
     report(0.3 * double(++decoded) / nodes.size(), "Reading audio");
   });
+
+  {
+    int withAudio = 0;
+    for (auto& n : nodes) withAudio += !n.coarse.empty();
+    logInfo("decoded " + std::to_string(nodes.size()) + " nodes (" + std::to_string(withAudio) +
+            " with audio) in " + elapsed());
+  }
 
   // ---- 3. Match every cross-device pair of nodes. ----
   struct Pair { int a, b; };
@@ -170,8 +245,10 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     edgeNodes[i] = {A, B};
     try {
       e.match = matchDecoded(clips[nodes[A].lead].path, clips[nodes[B].lead].path,
-                             nodes[A].coarse, nodes[B].coarse, opts.match);
-    } catch (...) {
+                             nodes[A].coarse, nodes[B].coarse, opts.match,
+                             nodes[A].spec.get());
+    } catch (const std::exception& ex) {
+      logError("match " + e.a + " / " + e.b + " failed: " + ex.what());
       e.match = MatchResult{};
     }
     if (e.match.found && e.match.confidence >= opts.autoConfidence) e.status = "used";
@@ -180,6 +257,18 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     report(0.3 + 0.4 * double(++matched) / std::max<size_t>(1, pairs.size()),
            "Matching audio");
   });
+
+  {
+    int used = 0, review = 0;
+    for (auto& e : edges) used += e.status == "used", review += e.status == "review";
+    logInfo("matched " + std::to_string(pairs.size()) + " pairs in " + elapsed() + ": " +
+            std::to_string(used) + " confident, " + std::to_string(review) + " for review");
+    for (auto& e : edges)
+      if (e.status != "rejected")
+        logInfo("  " + e.status + " " + e.a + " <- " + e.b +
+                fmt(" offset %.6f s conf %.2f ratio %.2f", e.match.offset, e.match.confidence, e.match.peakRatio) +
+                fmt(" corr %.2f overlap %.1f s", e.match.correlation, e.match.overlap));
+  }
 
   // Manual edges from the Review panel override automatic ones.
   std::map<std::string, int> nodeById;
@@ -234,6 +323,9 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
       DriftResult r = measureDrift(clips[nodes[A].lead].path, clips[nodes[B].lead].path,
                                    edges[i].match.offset, d, nodes[A].duration,
                                    nodes[B].duration);
+      logInfo("drift " + edges[i].a + " <- " + edges[i].b +
+              fmt(": %.2f ppm, rms %.1f us, %g points", r.ppm, r.residualRms * 1e6, double(r.points.size())) +
+              (r.valid ? "" : " (not enough clean windows; ignored)"));
       if (r.valid) {
         const double w = edges[i].match.confidence;
         std::vector<Obs> pts;
@@ -241,7 +333,8 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
           if (p.inlier) pts.push_back({p.timeB, p.offset, w});
         obs[i] = pts;
       }
-    } catch (...) {
+    } catch (const std::exception& ex) {
+      logError("drift " + edges[i].a + " <- " + edges[i].b + " failed: " + ex.what());
     }
     report(0.7 + 0.25 * double(++drifted) / std::max<size_t>(1, driftJobs.size()),
            "Measuring drift");
@@ -329,6 +422,8 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
       if (e.status == "used" && e.residual > worst) worst = e.residual, worstEdge = int(i);
     }
     if (worst <= opts.outlierTolerance || worstEdge < 0) break;
+    logWarn("dropping inconsistent match " + edges[worstEdge].a + " <- " + edges[worstEdge].b +
+            fmt(" (residual %.2f ms)", worst * 1000));
     edges[worstEdge].status = "outlier";
   }
 
@@ -387,6 +482,16 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
     return v[v.size() / 2];
   };
+  // Span of each scene from its audio-synced clips, to catch bad clocks.
+  std::map<int, std::pair<double, double>> span;
+  for (size_t i = 0; i < clips.size(); ++i) {
+    const auto& r = out.clips[i];
+    if (r.method != "audio" && r.method != "manual") continue;
+    const double dur = clips[i].duration > 0 ? clips[i].duration : nodes[nodeOf[i]].duration;
+    auto it = span.find(r.component);
+    if (it == span.end()) span[r.component] = {r.position, r.position + dur};
+    else it->second = {std::min(it->second.first, r.position), std::max(it->second.second, r.position + dur)};
+  }
   for (size_t i = 0; i < clips.size(); ++i) {
     auto& r = out.clips[i];
     if (r.method != "none" || tclips[i].timestamp < 0) continue;
@@ -408,6 +513,18 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
       r.position = tclips[i].timestamp + median(it->second);
       r.component = it->first;
     } else {
+      continue;
+    }
+    // A camera with an unset clock would land days or years away; leave
+    // it unplaced rather than stretch the timeline.
+    const double dur = clips[i].duration > 0 ? clips[i].duration : nodes[nodeOf[i]].duration;
+    auto sp = span.find(r.component);
+    if (sp != span.end() && (r.position + dur < sp->second.first - 3600.0 ||
+                             r.position > sp->second.second + 3600.0)) {
+      logWarn("clock looks wrong for " + clips[i].path + fmt(": would land %.0f s outside its scene; not placed",
+              r.position < sp->second.first ? sp->second.first - r.position - dur : r.position - sp->second.second));
+      r.position = 0.0;
+      r.component = -1;
       continue;
     }
     r.method = "timestamp";
@@ -438,6 +555,23 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
       r.segments.push_back({s.startB, s.endB, r.position + s.offset + s.startB});
     }
   }
+  // File timeline -> Premiere clip time (zero at the first video frame).
+  for (size_t i = 0; i < clips.size(); ++i) {
+    auto& r = out.clips[i];
+    const double v = videoStart[i];
+    if (r.component < 0 || v == 0.0) continue;
+    r.position += v;
+    std::vector<Segment> segs;
+    for (auto s : r.segments) {
+      s.start -= v;
+      s.end -= v;
+      if (s.end <= 0.0) continue;
+      if (s.start < 0.0) s.position -= s.start, s.start = 0.0;
+      segs.push_back(s);
+    }
+    r.segments = segs;
+  }
+
   for (int c = 0; c < out.components; ++c) {
     double minPos = 1e300;
     for (auto& r : out.clips)
@@ -451,6 +585,19 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     }
   }
 
+  {
+    int byAudio = 0, byTs = 0, none = 0;
+    for (auto& r : out.clips) {
+      byAudio += r.method == "audio" || r.method == "manual";
+      byTs += r.method == "timestamp";
+      none += r.method == "none";
+      logInfo("  clip " + r.id + " " + r.method + fmt(" pos %.6f drift %.1f ppm", r.position, r.drift) +
+              " segments " + std::to_string(r.segments.size()) + (r.needsReview ? " REVIEW" : ""));
+    }
+    logInfo("analyze done in " + elapsed() + ": " + std::to_string(out.components) + " scene(s), " +
+            std::to_string(byAudio) + " by audio, " + std::to_string(byTs) + " by timestamp, " +
+            std::to_string(none) + " unplaced");
+  }
   out.edges = std::move(edges);
   report(1.0, "Done");
   return out;

@@ -9,8 +9,6 @@
 
 namespace syncu {
 
-namespace {
-
 void removeDc(std::vector<float>& x) {
   if (x.empty()) return;
   double mean = 0.0;
@@ -18,6 +16,8 @@ void removeDc(std::vector<float>& x) {
   mean /= double(x.size());
   for (auto& v : x) v -= float(mean);
 }
+
+namespace {
 
 // Vertex of the parabola through (-1, ym), (0, y0), (1, yp).
 double parabolicPeak(double ym, double y0, double yp) {
@@ -31,13 +31,22 @@ float clamp01(float v) { return std::min(1.0f, std::max(0.0f, v)); }
 
 }  // namespace
 
-std::vector<Candidate> coarseSearch(const std::vector<float>& aIn,
-                                    const std::vector<float>& bIn, int rate,
-                                    double minOverlap, int maxCandidates) {
-  std::vector<float> a = aIn, b = bIn;
-  removeDc(a);
-  removeDc(b);
-  std::vector<float> r = crossCorrelate(a, b, /*phat=*/true);
+std::vector<Candidate> coarseSearch(const std::vector<float>& a,
+                                    const std::vector<float>& b, int rate,
+                                    double minOverlap, int maxCandidates,
+                                    SpectrumCache* cacheA) {
+  if (a.empty() || b.empty()) return {};
+  std::vector<float> r;
+  const size_t n = nextPow2(a.size() + b.size() - 1);
+  if (cacheA) {
+    std::lock_guard<std::mutex> l(cacheA->mu);
+    if (cacheA->n != n) {
+      cacheA->spec = spectrum(a, n);
+      cacheA->n = n;
+    }
+  }
+  if (cacheA) r = crossCorrelateSpec(cacheA->spec, a.size(), b, /*phat=*/true);
+  else r = crossCorrelate(a, b, /*phat=*/true);
   if (r.empty()) return {};
 
   const long long lenA = (long long)a.size(), lenB = (long long)b.size();
@@ -142,20 +151,23 @@ MatchResult matchFiles(const std::string& pathA, const std::string& pathB,
   da.sampleRate = db.sampleRate = opts.coarseRate;
   da.channel = opts.channelA;
   db.channel = opts.channelB;
-  return matchDecoded(pathA, pathB, decodeAudio(pathA, da),
-                      decodeAudio(pathB, db), opts);
+  std::vector<float> a = decodeAudio(pathA, da), b = decodeAudio(pathB, db);
+  removeDc(a);
+  removeDc(b);
+  return matchDecoded(pathA, pathB, a, b, opts);
 }
 
 MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
                          const std::vector<float>& a,
                          const std::vector<float>& b,
-                         const MatchOptions& opts) {
+                         const MatchOptions& opts,
+                         SpectrumCache* cacheA) {
   MatchResult res;
   const double durA = double(a.size()) / opts.coarseRate;
   const double durB = double(b.size()) / opts.coarseRate;
 
   res.candidates = coarseSearch(a, b, opts.coarseRate, opts.minOverlap,
-                                opts.maxCandidates);
+                                opts.maxCandidates, cacheA);
   if (res.candidates.empty()) return res;
 
   const Candidate& best = res.candidates[0];
@@ -169,6 +181,19 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
   const double ovE = std::min(durB, durA - best.offset);
   res.overlap = std::max(0.0, ovE - ovS);
   if (res.overlap <= 0.0) return res;
+
+  // Confidence: a match needs a clearly unique coarse peak (ratio), a peak
+  // well above the noise floor (score), and real waveform similarity.
+  const float cRatio = clamp01((res.peakRatio - 1.0f) / 1.5f);
+  const float cScore = clamp01((best.score - 6.0f) / 14.0f);
+  const float coarseConf = std::sqrt(cRatio * cScore);
+  if (coarseConf < opts.refineMinCoarse) {
+    res.offset = best.offset;
+    res.timeB = 0.5 * (ovS + ovE);
+    res.confidence = coarseConf * 0.6f;
+    res.found = res.confidence > 0.0f;
+    return res;
+  }
 
   // Refine on the loudest stretch of the overlap (most signal to lock onto).
   const double win = std::min(opts.fineWindow, res.overlap);
@@ -223,12 +248,8 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
     res.polarityInverted = corr < 0.0f;
   }
 
-  // Confidence: a match needs a clearly unique coarse peak (ratio), a peak
-  // well above the noise floor (score), and real waveform similarity.
-  const float cRatio = clamp01((res.peakRatio - 1.0f) / 1.5f);
-  const float cScore = clamp01((best.score - 6.0f) / 14.0f);
   const float cCorr = clamp01(std::fabs(res.correlation) / 0.5f);
-  res.confidence = std::sqrt(cRatio * cScore) * (0.6f + 0.4f * cCorr);
+  res.confidence = coarseConf * (0.6f + 0.4f * cCorr);
   res.found = res.confidence > 0.0f;
   return res;
 }
