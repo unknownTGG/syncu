@@ -102,7 +102,7 @@ Syncu.VERSION = "0.1.1";
 
     sec("helper");
     const health = await Syncu.engine.health();
-    out.push(health ? JSON.stringify(health) : "NOT REACHABLE on 127.0.0.1:47800");
+    out.push(health ? JSON.stringify(health) : `NOT REACHABLE on 127.0.0.1:47800 (${Syncu.engine.lastError})`);
 
     sec("settings");
     out.push(JSON.stringify(ctx.settings));

@@ -146,11 +146,20 @@ async function main() {
   await sleep(2500);
   check("log persisted to data folder", (memFiles["syncu-log.txt"] || "").includes("build"));
 
-  const errLines = logText.split("\n").filter((l) => l.includes("[error]"));
+  const errLines = $("log").textContent.split("\n").filter((l) => l.includes("[error]"));
   check("no errors logged", errLines.length === 0, errLines.slice(0, 5).join(" | "));
   check("no console errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 
+  // ---- Helper stops mid-session: clear error + report says why ----
   helper.kill();
+  await sleep(500);
+  $("summary").innerHTML = "";
+  await click("analyzeBtn", () => !busy("analyzeBtn"));
+  check("helper down: clear error shown", /helper isn't ready/.test($("summary").textContent), $("summary").textContent.trim().slice(0, 100));
+  check("helper down: pill turns red", $("engineStatus").className.includes("bad"), $("engineStatus").textContent);
+  await click("copyReportBtn", () => !busy("copyReportBtn"));
+  check("helper down: report explains", /NOT REACHABLE on 127\.0\.0\.1:47800 \(.+\)/.test(clipboard), (clipboard.match(/NOT REACHABLE.*/) || [""])[0]);
+
   console.log(failed ? `\n${failed} FAILED (report: ${MEDIA}/sim-report.txt)` : "\nall simulation checks passed");
   process.exit(failed ? 1 : 0);
 

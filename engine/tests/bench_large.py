@@ -23,6 +23,19 @@ def main():
     d = sys.argv[1] if len(sys.argv) > 1 else tempfile.mkdtemp(prefix="syncu-bench-")
     os.makedirs(d, exist_ok=True)
     print("media in", d)
+    if os.path.exists(f"{d}/truth.json"):
+        with open(f"{d}/truth.json") as f:
+            saved = json.load(f)
+        clips, truth = saved["clips"], saved["truth"]
+        print("reusing media")
+    else:
+        clips, truth = generate(d)
+        with open(f"{d}/truth.json", "w") as f:
+            json.dump({"clips": clips, "truth": truth}, f)
+    run(d, clips, truth)
+
+
+def generate(d):
     t0 = time.time()
     scene = speechlike(3700)
     write_wav(f"{d}/rec.wav", room(resample_drift(scene[10 * SR: 3610 * SR], 30.0), 30, reverb=False))
@@ -40,7 +53,10 @@ def main():
             truth[cid] = t
             t += ln + rng.uniform(5, 40)
     print(f"generated {len(clips)} files in {time.time() - t0:.0f} s")
+    return clips, truth
 
+
+def run(d, clips, truth):
     with open(f"{d}/req.json", "w") as f:
         json.dump({"clips": clips}, f)
     t0 = time.time()

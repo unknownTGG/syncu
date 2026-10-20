@@ -82,7 +82,7 @@ window.Syncu = window.Syncu || {};
       pill.className = "pill bad";
       pill.title = "Run install-mac.command / install-windows.ps1 (see README)";
     }
-    const status = h ? `${h.version} ffmpeg=${h.ffmpegVersion ? "ok" : "MISSING"}` : "down";
+    const status = h ? `${h.version} ffmpeg=${h.ffmpegVersion ? "ok" : "MISSING"}` : `down (${Syncu.engine.lastError})`;
     if (status !== lastHealth) Syncu.log(h ? "info" : "warn", `helper: ${status}${h ? ` (${h.os}, ${h.ffmpeg})` : ""}`);
     lastHealth = status;
     return !!(h && h.ok && h.ffmpegVersion !== "");

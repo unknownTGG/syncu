@@ -15,10 +15,17 @@ Syncu.engine = (() => {
   }
 
   return {
+    lastError: "",
+
     async health() {
       try {
-        return await call("GET", "/health");
+        const h = await call("GET", "/health");
+        this.lastError = "";
+        return h;
       } catch (e) {
+        // Keep the reason: "helper not running" and "Premiere blocked the
+        // request" need different fixes.
+        this.lastError = (e && (e.message || String(e))) || "unknown";
         return null;
       }
     },

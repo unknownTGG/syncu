@@ -1,90 +1,59 @@
 #include "fft.h"
 
+#include <algorithm>
 #include <cmath>
+
+#include <pocketfft/pocketfft_hdronly.h>
 
 namespace syncu {
 
-constexpr double kPi = 3.14159265358979323846;
-
-size_t nextPow2(size_t n) {
-  size_t p = 1;
-  while (p < n) p <<= 1;
-  return p;
-}
-
-void fft(std::vector<cfloat>& data, bool inverse) {
-  const size_t n = data.size();
-  if (n < 2) return;
-
-  // Bit-reversal permutation.
-  for (size_t i = 1, j = 0; i < n; ++i) {
-    size_t bit = n >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
-    if (i < j) std::swap(data[i], data[j]);
-  }
-
-  // Twiddles are computed in double so large transforms stay accurate.
-  for (size_t len = 2; len <= n; len <<= 1) {
-    const double ang = 2.0 * kPi / double(len) * (inverse ? 1.0 : -1.0);
-    const size_t half = len / 2;
-    std::vector<cfloat> tw(half);
-    for (size_t k = 0; k < half; ++k)
-      tw[k] = cfloat(float(std::cos(ang * double(k))), float(std::sin(ang * double(k))));
-    for (size_t i = 0; i < n; i += len) {
-      for (size_t k = 0; k < half; ++k) {
-        cfloat u = data[i + k];
-        cfloat v = data[i + k + half] * tw[k];
-        data[i + k] = u + v;
-        data[i + k + half] = u - v;
-      }
-    }
-  }
-
-  if (inverse) {
-    const float inv = 1.0f / float(n);
-    for (auto& x : data) x *= inv;
-  }
+size_t fftSize(size_t n) {
+  return pocketfft::detail::util::good_size_real(std::max<size_t>(n, 1));
 }
 
 std::vector<cfloat> spectrum(const std::vector<float>& x, size_t n) {
-  std::vector<cfloat> f(n);
-  for (size_t i = 0; i < x.size() && i < n; ++i) f[i] = x[i];
-  fft(f, false);
-  return f;
+  std::vector<float> in(n, 0.0f);
+  std::copy(x.begin(), x.begin() + std::min(x.size(), n), in.begin());
+  std::vector<cfloat> out(n / 2 + 1);
+  pocketfft::r2c<float>({n}, {sizeof(float)}, {sizeof(cfloat)}, 0, pocketfft::FORWARD,
+                        in.data(), out.data(), 1.0f);
+  return out;
 }
 
 std::vector<float> crossCorrelate(const std::vector<float>& a,
                                   const std::vector<float>& b, bool phat) {
   if (a.empty() || b.empty()) return {};
-  return crossCorrelateSpec(spectrum(a, nextPow2(a.size() + b.size() - 1)), a.size(), b, phat);
+  const size_t n = fftSize(a.size() + b.size() - 1);
+  return crossCorrelateSpec(spectrum(a, n), n, a.size(), b, phat);
 }
 
-std::vector<float> crossCorrelateSpec(const std::vector<cfloat>& specA, size_t lenA,
-                                      const std::vector<float>& b, bool phat) {
+std::vector<float> crossCorrelateSpec(const std::vector<cfloat>& specA, size_t n,
+                                      size_t lenA, const std::vector<float>& b,
+                                      bool phat) {
   if (lenA == 0 || b.empty()) return {};
-  const size_t outLen = lenA + b.size() - 1;
-  const size_t n = specA.size();
-  std::vector<cfloat> fa(n);
-  std::vector<cfloat> fb = spectrum(b, n);
-  for (size_t i = 0; i < n; ++i) fa[i] = specA[i];
-
-  for (size_t i = 0; i < n; ++i) {
-    cfloat x = fa[i] * std::conj(fb[i]);
+  std::vector<cfloat> x = spectrum(b, n);
+  for (size_t i = 0; i < x.size(); ++i) {
+    // a * conj(b), written out (std::complex multiply is slow without -ffast-math).
+    const float ar = specA[i].real(), ai = specA[i].imag();
+    const float br = x[i].real(), bi = x[i].imag();
+    float re = ar * br + ai * bi, im = ai * br - ar * bi;
     if (phat) {
-      float m = std::abs(x);
-      x = m > 1e-12f ? x / m : cfloat(0.0f, 0.0f);
+      const float m = std::sqrt(re * re + im * im);
+      if (m > 1e-12f) re /= m, im /= m;
+      else re = im = 0.0f;
     }
-    fa[i] = x;
+    x[i] = cfloat(re, im);
   }
-  std::vector<cfloat>().swap(fb);
-  fft(fa, true);
+  std::vector<float> circ(n);
+  pocketfft::c2r<float>({n}, {sizeof(cfloat)}, {sizeof(float)}, 0, pocketfft::BACKWARD,
+                        x.data(), circ.data(), 1.0f / float(n));
 
   // Circular result: lag k >= 0 at index k, lag k < 0 at index n + k.
+  const size_t outLen = lenA + b.size() - 1;
   std::vector<float> out(outLen);
   const size_t negCount = b.size() - 1;
-  for (size_t i = 0; i < negCount; ++i) out[i] = fa[n - negCount + i].real();
-  for (size_t i = 0; i < lenA; ++i) out[negCount + i] = fa[i].real();
+  for (size_t i = 0; i < negCount; ++i) out[i] = circ[n - negCount + i];
+  for (size_t i = 0; i < lenA; ++i) out[negCount + i] = circ[i];
   return out;
 }
 

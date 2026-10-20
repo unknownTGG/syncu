@@ -231,6 +231,11 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
           !nodes[b].coarse.empty())
         pairs.push_back({a, b});
 
+  // Final confidence never exceeds the coarse one, so pairs whose coarse
+  // score is already below the review threshold skip the costly fine step.
+  MatchOptions mo = opts.match;
+  mo.refineMinCoarse = std::max(mo.refineMinCoarse, opts.reviewConfidence);
+
   std::vector<EdgeResult> edges(pairs.size());
   std::vector<std::pair<int, int>> edgeNodes(pairs.size());
   std::atomic<size_t> matched{0};
@@ -245,7 +250,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     edgeNodes[i] = {A, B};
     try {
       e.match = matchDecoded(clips[nodes[A].lead].path, clips[nodes[B].lead].path,
-                             nodes[A].coarse, nodes[B].coarse, opts.match,
+                             nodes[A].coarse, nodes[B].coarse, mo,
                              nodes[A].spec.get());
     } catch (const std::exception& ex) {
       logError("match " + e.a + " / " + e.b + " failed: " + ex.what());

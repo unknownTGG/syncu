@@ -76,6 +76,7 @@ cmake -S engine -B engine/build && cmake --build engine/build -j
 SYNCU_ENGINE=engine/build/syncu-engine SYNCU_TEST_MEDIA=/tmp/syncu-media python3 engine/tests/run_tests.py   # needs ffmpeg + numpy
 node plugin/tests/plan.test.js
 (cd plugin/tests/sim && npm install && node run-sim.js /tmp/syncu-media)  # panel + mock Premiere
+SYNCU_ENGINE=engine/build/syncu-engine python3 engine/tests/bench_large.py /tmp/syncu-bench   # 161-clip benchmark
 engine/build/syncu-engine serve            # run the helper in a terminal
 engine/build/syncu-engine match a.wav b.mp4
 ```

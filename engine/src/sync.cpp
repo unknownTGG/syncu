@@ -37,16 +37,21 @@ std::vector<Candidate> coarseSearch(const std::vector<float>& a,
                                     SpectrumCache* cacheA) {
   if (a.empty() || b.empty()) return {};
   std::vector<float> r;
-  const size_t n = nextPow2(a.size() + b.size() - 1);
   if (cacheA) {
-    std::lock_guard<std::mutex> l(cacheA->mu);
-    if (cacheA->n != n) {
-      cacheA->spec = spectrum(a, n);
-      cacheA->n = n;
+    // One FFT size per long file (big enough for its longest partner), so
+    // its spectrum is computed once and shared by every pair.
+    std::unique_lock<std::mutex> l(cacheA->mu);
+    if (cacheA->n < a.size() + b.size() - 1) {
+      cacheA->n = fftSize(a.size() + std::max(b.size(), a.size() / 4) - 1);
+      cacheA->spec = spectrum(a, cacheA->n);
     }
+    const size_t n = cacheA->n;
+    const std::vector<std::complex<float>>& spec = cacheA->spec;
+    l.unlock();
+    r = crossCorrelateSpec(spec, n, a.size(), b, /*phat=*/true);
+  } else {
+    r = crossCorrelate(a, b, /*phat=*/true);
   }
-  if (cacheA) r = crossCorrelateSpec(cacheA->spec, a.size(), b, /*phat=*/true);
-  else r = crossCorrelate(a, b, /*phat=*/true);
   if (r.empty()) return {};
 
   const long long lenA = (long long)a.size(), lenB = (long long)b.size();

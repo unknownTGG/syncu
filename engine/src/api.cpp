@@ -23,6 +23,7 @@ void readMatchOptions(const json& o, MatchOptions& m) {
   get(o, "fineSearch", m.fineSearch);
   get(o, "minOverlap", m.minOverlap);
   get(o, "maxCandidates", m.maxCandidates);
+  get(o, "refineMinCoarse", m.refineMinCoarse);
 }
 
 json matchToJson(const MatchResult& m) {
