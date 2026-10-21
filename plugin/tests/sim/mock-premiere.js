@@ -63,10 +63,26 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
   class Clip extends ProjectItem {
     constructor(m) {
       super("clip", m.name);
-      Object.assign(this, { path: m.path, duration: m.duration, hasVideo: m.hasVideo, hasAudio: m.hasAudio });
+      Object.assign(this, { path: m.path, duration: m.duration, hasVideo: m.hasVideo, hasAudio: m.hasAudio,
+        proxyPath: m.proxyPath || "", offline: !!m.offline });
     }
     async getMediaFilePath() {
-      return this.path;
+      return this.path; // like Premiere: the original's path, even when offline
+    }
+    async hasProxy() {
+      return !!this.proxyPath;
+    }
+    async getProxyPath() {
+      return this.proxyPath;
+    }
+    async isOffline() {
+      return this.offline;
+    }
+    async getInPoint(mediaType) {
+      return TickTime.createWithSeconds(0);
+    }
+    async getOutPoint(mediaType) {
+      return TickTime.createWithSeconds(this.duration);
     }
   }
   class Bin extends ProjectItem {

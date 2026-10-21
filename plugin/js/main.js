@@ -141,7 +141,8 @@ window.Syncu = window.Syncu || {};
 
   function updateButtons() {
     $("analyzeBtn").disabled = state.clips.length === 0;
-    $("buildBtn").disabled = !(state.result && state.result.clips.some((c) => c.method !== "none"));
+    // Build works even if nothing synced: unsynced clips still go on the timeline.
+    $("buildBtn").disabled = !(state.result && state.result.clips.some((c) => c.method !== "none" || c.duration > 0));
   }
 
   let lastHealth = null;
@@ -221,8 +222,8 @@ window.Syncu = window.Syncu || {};
     Syncu.log(`settings: ${JSON.stringify(st)}`);
     const request = {
       clips: state.clips.map((c) => ({
-        id: c.id, path: c.path, device: c.device, group: c.group || "",
-        isVideo: !!c.isVideo, hasAudio: true,
+        id: c.id, path: c.path, altPath: c.proxyPath || "", device: c.device, group: c.group || "",
+        isVideo: !!c.isVideo, hasAudio: true, duration: c.duration > 0 ? c.duration : -1,
       })),
       options: {
         autoConfidence: st.autoConf,
@@ -261,10 +262,20 @@ window.Syncu = window.Syncu || {};
     const n = (m) => r.clips.filter((c) => c.method === m).length;
     const drift = r.clips.filter((c) => c.segments.length > 1);
     const stat = (num, label, cls) => `<div class="stat ${num ? cls : ""}"><div class="num-big">${num}</div><div class="lbl">${label}</div></div>`;
-    let html = `<div class="stats">${stat(n("audio") + n("manual"), "Synced by audio", "good")}${stat(n("timestamp"), "By file time", "warnc")}${stat(n("none"), "Not placed", "badc")}</div>`;
+    let html = `<div class="stats">${stat(n("audio") + n("manual"), "Synced by audio", "good")}${stat(n("timestamp"), "By file time", "warnc")}${stat(n("none"), "Not synced", "badc")}</div>`;
+    // Media problems first: they explain everything else.
+    const missing = r.clips.filter((c) => c.source === "missing");
+    const proxied = r.clips.filter((c) => c.source === "proxy").length;
+    if (missing.length) {
+      const ex = state.clips.find((c) => c.id === missing[0].id);
+      const vol = ex && (String(ex.path).match(/^\/Volumes\/[^/]+/) || [""])[0];
+      html += `<div class="row err media"><div class="title">${missing.length} file(s) can't be read</div>
+        <div class="meta">${vol ? `They're on ${esc(vol)}, which isn't connected. ` : "The files were moved or are offline. "}Connect the drive, or create/attach proxies in Premiere, then Analyze again.</div></div>`;
+    }
+    if (proxied) html += `<div class="row ok"><div class="meta">${proxied} clip(s) analysed from their proxies (originals offline).</div></div>`;
     const scenes = `${r.components} scene${r.components === 1 ? "" : "s"}`;
     html += `<div class="row ok"><div class="title">Ready to build</div>
-      <div class="meta">${scenes}${drift.length ? ` · drift corrected on ${drift.length} clip(s)` : ""} · recorder audio placed full length</div></div>`;
+      <div class="meta">${scenes}${drift.length ? ` · drift corrected on ${drift.length} clip(s)` : ""} · recorder audio placed full length${n("none") ? ` · ${n("none")} not-synced clip(s) go in a marked area at the end` : ""}</div></div>`;
     for (const c of drift)
       html += `<div class="row"><div class="meta">${esc(clipName(c.id))}: ${c.driftPpm.toFixed(1)} ppm → ${c.segments.length} pieces</div></div>`;
     // Full-length clips are aligned at their middle; say how far the ends drift.
@@ -299,7 +310,9 @@ window.Syncu = window.Syncu || {};
     }
     for (const c of r.clips) {
       if (!c.needsReview) continue;
-      const why = c.method === "timestamp" ? "placed by file time only — check it (marked on the timeline)" : "no audio match — not placed";
+      const why = c.method === "timestamp" ? "placed by file time only — check it (marked on the timeline)"
+        : c.source === "missing" ? "file not found (drive offline?) and no proxy — goes in the “Not synced” area"
+        : "no audio match — goes in the “Not synced” area to place by hand";
       rows.push(`<div class="row ${c.method === "none" ? "err" : "warn"}"><div class="title">${esc(clipName(c.id))}</div><div class="meta">${why}</div></div>`);
     }
     $("reviewSection").classList.toggle("hidden", rows.length === 0);

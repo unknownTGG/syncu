@@ -75,6 +75,7 @@ std::string analyzeJson(const std::string& request, const ProgressFn& progress) 
       get(c, "duration", ci.duration);
       get(c, "timestamp", ci.timestamp);
       get(c, "channel", ci.channel);
+      get(c, "altPath", ci.altPath);
       clips.push_back(ci);
     }
 
@@ -93,7 +94,9 @@ std::string analyzeJson(const std::string& request, const ProgressFn& progress) 
                     {"driftPpm", c.drift},
                     {"confidence", c.confidence},
                     {"needsReview", c.needsReview},
-                    {"segments", segs}});
+                    {"segments", segs},
+                    {"source", c.source},
+                    {"duration", c.duration}});
     }
     json je = json::array();
     for (const auto& e : r.edges)

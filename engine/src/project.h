@@ -14,6 +14,7 @@ namespace syncu {
 struct ClipInfo {
   std::string id;
   std::string path;
+  std::string altPath;      // e.g. Premiere proxy, used when `path` is offline
   std::string device;
   std::string group;        // optional: files that are sample-locked together
   bool isVideo = false;     // video clips are never cut for drift unless needed
@@ -55,6 +56,8 @@ struct ClipResult {
   float confidence = 0.0f;
   bool needsReview = false;
   std::vector<Segment> segments;  // >1 when cut to correct drift
+  std::string source = "original";  // original | proxy | missing
+  double duration = 0.0;            // seconds of media (0 = unknown)
 };
 
 struct EdgeResult {

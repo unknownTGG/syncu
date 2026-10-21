@@ -127,6 +127,13 @@ Click **Scan selection**. The device list shows what was found: **CAM** for came
 
 Multi-file recorders are detected automatically, for example Zoom `ZOOM0001_Tr1.WAV` / `_Tr2` / `_LR`, F-series `230101_0001_Tr1.wav`, and Tascam. Each file of a take gets its own track, and they stay locked together.
 
+### Editing with proxies
+
+Syncu reads each clip's **original** file. If the original is offline, for example on an unplugged drive, it reads the clip's **Premiere proxy** instead, and the results say how many clips came from proxies. A clip with neither is reported as *"file(s) can't be read"*, along with the drive it expects, such as `/Volumes/T7`.
+
+- Proxies sync as accurately as originals, as long as they include audio. Premiere's default proxy presets do.
+- Silent clips placed by file time need the original: a proxy's file date is when the proxy was made, not when the shot was recorded.
+
 ### 3. Pick an output
 
 See [Output modes](#output-modes). Leave **Mute camera scratch audio** on unless you want to hear the camera mics.
@@ -143,7 +150,7 @@ If anything is uncertain, a **Review** section appears.
 
 - **Uncertain matches** show the clip pair, a confidence score, and a dropdown of candidate offsets. Pick the right one, optionally **nudge** it in milliseconds, tick **Use this match**, then click **Re-analyze with my fixes**.
 - **Placed by file time** means the clip had no usable audio, so it was positioned by its file timestamp. Check it on the timeline; it's marked there with a marker.
-- **Not placed** means no audio match was found and the clip's time couldn't be trusted. Place it manually.
+- **Not synced** means no audio match was found, or the file couldn't be read. These clips still go on the timeline, in a **Not synced** area after the synced material with a marker, so nothing goes missing. In multicam and per-take modes they get their own *not synced* sequence. Place them by hand.
 
 ### 6. Build
 
@@ -210,6 +217,7 @@ Under **Output → Advanced**:
 | Status says **helper not running** | Re-run the installer (`bash install-mac.command` / `install-windows.ps1`). To check by hand, run the helper in a terminal: Mac `~/Library/Application\ Support/Syncu/syncu-engine serve`, Windows `%LOCALAPPDATA%\Syncu\syncu-engine.exe serve`. If it says *port 47800 busy*, it's already running. |
 | Status says **ffmpeg missing** | Mac: `brew install ffmpeg`, then re-run the installer. Windows: make sure `ffmpeg.exe` sits next to `syncu-engine.exe` in `%LOCALAPPDATA%\Syncu`. |
 | Helper runs but the panel can't reach it | Copy the report. The `helper` section says why (e.g. Premiere blocked the request). |
+| Everything **not synced**, files "can't be read" | The originals are offline (e.g. drive unplugged) and have no proxies. Connect the drive, or attach proxies in Premiere, then Analyze again. The red notice in Results names the missing drive. |
 | **Scan finds 0 clips** | Select bins or clips in the **Project panel** (not the timeline) before clicking Scan, or choose *Active timeline* as the source. |
 | "only one device found" | Every clip landed in one device, so nothing can be matched. Put each camera/recorder in its own bin, or rename devices in the list. |
 | Clips **not placed** | No audio match: check the clip has scratch audio and really overlaps another device's recording. Try *Search accuracy: High*, or fix it in Review. |

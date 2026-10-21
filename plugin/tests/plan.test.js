@@ -119,6 +119,22 @@ const trimmed = build.planBuild(clips, fullResult, { mode: "takes", frameTicks: 
 const tr = trimmed.sequences[0].placements.find((x) => x.clipId === "R");
 check("trimTakes: recorder trimmed to the take", tr && !tr.whole && tr.srcOut - tr.srcIn < 110, tr && `${tr.srcIn.toFixed(1)}-${tr.srcOut.toFixed(1)}`);
 
+// Clips that didn't sync still go on the timeline, in a marked area.
+const withUnsynced = {
+  components: 1,
+  clips: [...fullResult.clips, { id: "X", method: "none", component: -1, driftPpm: 0, segments: [], duration: 30, needsReview: true }],
+};
+const tl = build.planBuild(clips, withUnsynced, { mode: "timeline", frameTicks: FT });
+const xs = tl.sequences[0].placements.filter((p) => p.clipId === "X");
+const syncedEnd = Math.max(...tl.sequences[0].placements.filter((p) => p.clipId !== "X").map((p) => p.pos + (p.kind === "av" ? 0 : p.srcOut - p.srcIn)));
+check("unsynced/timeline: clip placed after synced material", xs.length === 1 && xs[0].pos >= syncedEnd, xs[0] && xs[0].pos.toFixed(1));
+check("unsynced/timeline: area marked", tl.sequences[0].markers.some((m) => m.name === "Not synced"));
+check("unsynced/timeline: not reported as dropped", tl.unplaced.length === 0 && tl.unsynced.includes("X"));
+const mcu = build.planBuild(clips, withUnsynced, { mode: "multicam", frameTicks: FT });
+check("unsynced/multicam: separate 'not synced' sequence", mcu.sequences.some((s) => s.name.endsWith("not synced") && s.placements.some((p) => p.clipId === "X")));
+const nothing = build.planBuild(clips, { components: 0, clips: [{ id: "X", method: "none", component: -1, driftPpm: 0, segments: [], duration: 30 }] }, { mode: "timeline", frameTicks: FT });
+check("unsynced: builds even when nothing synced", nothing.sequences.length === 1 && nothing.sequences[0].placements.length === 1);
+
 // Scratch audio tracks come after recorder tracks and get muted.
 const mc = build.planBuild(clips, result, { mode: "multicam", frameTicks: FT, muteScratch: true }).sequences[0];
 const recTracks = mc.placements.filter((p) => p.kind === "audio").map((p) => p.audioTrack);

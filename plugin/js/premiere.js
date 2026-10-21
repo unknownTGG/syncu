@@ -60,6 +60,44 @@ Syncu.pp = (() => {
 
   // ---- Gathering media ----
 
+  // Proxy path, offline flag and duration for a clip (each call guarded:
+  // any of them may be missing on some Premiere builds or media types).
+  async function mediaInfo(clip) {
+    const info = { proxyPath: "", offline: false, duration: 0 };
+    try {
+      if (await clip.hasProxy()) info.proxyPath = (await clip.getProxyPath()) || "";
+    } catch (e) {
+      /* no proxy API */
+    }
+    try {
+      info.offline = !!(await clip.isOffline());
+    } catch (e) {
+      /* unknown */
+    }
+    for (const mt of [ppro.Constants.MediaType.VIDEO, ppro.Constants.MediaType.AUDIO]) {
+      try {
+        const d = seconds(await clip.getOutPoint(mt)) - seconds(await clip.getInPoint(mt));
+        if (d > 0) {
+          info.duration = d;
+          break;
+        }
+      } catch (e) {
+        /* try the next media type */
+      }
+    }
+    return info;
+  }
+
+  function logMediaSummary(clips) {
+    const proxies = clips.filter((c) => c.proxyPath).length;
+    const offline = clips.filter((c) => c.offline);
+    if (proxies) log(`${proxies} of ${clips.length} clip(s) have proxies`);
+    if (offline.length) {
+      const noProxy = offline.filter((c) => !c.proxyPath).length;
+      log(noProxy ? "warn" : "info", `${offline.length} clip(s) have offline originals (e.g. ${offline[0].path}); ${offline.length - noProxy} will be analysed from proxies${noProxy ? `, ${noProxy} have no proxy` : ""}`);
+    }
+  }
+
   // Flatten the project panel selection: bins are expanded recursively and
   // each clip remembers the bin it came from.
   async function selectedClips() {
@@ -79,7 +117,9 @@ Syncu.pp = (() => {
           children = null;
         }
         if (children) {
-          for (const c of children) await visit(c, itemName(item), depth + 1);
+          // Device = the bin the user selected (not a sub-bin like "Day 1",
+          // which may exist under several cameras).
+          for (const c of children) await visit(c, binName || itemName(item), depth + 1);
           return;
         }
       }
@@ -94,9 +134,10 @@ Syncu.pp = (() => {
         skipped.push(itemName(item)); // sequences, titles, offline media
         return;
       }
-      out.push({ projectItem: item, path, name: itemName(item), bin: binName });
+      out.push({ projectItem: item, path, name: itemName(item), bin: binName, ...(await mediaInfo(clip)) });
     }
     for (const it of items) await visit(it, null, 0);
+    logMediaSummary(out);
     if (skipped.length) log(`skipped ${skipped.length} non-media item(s): ${skipped.slice(0, 10).join(", ")}${skipped.length > 10 ? "…" : ""}`);
     return out;
   }
@@ -126,7 +167,7 @@ Syncu.pp = (() => {
       const key = `${device}|${path}`;
       if (seen.has(key)) return;
       seen.add(key);
-      out.push({ projectItem: pi, path, name: itemName(pi), device, isVideo });
+      out.push({ projectItem: pi, path, name: itemName(pi), device, isVideo, ...(await mediaInfo(clip)) });
     };
     const vCount = await seq.getVideoTrackCount();
     for (let v = 0; v < vCount; v++)
@@ -134,6 +175,7 @@ Syncu.pp = (() => {
     const aCount = await seq.getAudioTrackCount();
     for (let a = 0; a < aCount; a++)
       for (const ti of (await seq.getAudioTrack(a)).getTrackItems(T, false)) await add(ti, `A${a + 1}`, false);
+    logMediaSummary(out);
     return out;
   }
 

@@ -50,10 +50,16 @@ async function main() {
     const isAudio = name.endsWith(".wav");
     return { bin, name, path: p, duration: duration(p), hasVideo: !isAudio, hasAudio: name !== "camB_silent.mp4" && name !== "gimbal.mp4" };
   });
+  // Editing with proxies: camB_3's original is on an unplugged drive, its
+  // proxy is local. lost.MOV is offline with no proxy at all.
+  const camB3 = media.find((m) => m.name === "camB_3.mp4");
+  Object.assign(camB3, { path: "/Volumes/T7/Day 1/CamB/camB_3.MOV", proxyPath: camB3.path, offline: true });
+  media.push({ bin: "Cam B", name: "lost.MOV", path: "/Volumes/T7/Day 1/CamB/lost.MOV", duration: 12, hasVideo: true, hasAudio: false, offline: true });
   // Realistic file times: cameras/recorders write the file when recording
   // stops, so mtime = start + duration (engine uses start = mtime - duration).
   const base = 1.7e9;
   for (const m of media) {
+    if (m.offline) continue; // nothing on disk to touch
     const start = m.name === "recdrift.wav" ? 5 : m.name === "other.wav" ? 1000 : truth[m.name];
     const t = base + start + m.duration;
     fs.utimesSync(m.path, t, t);
@@ -118,6 +124,8 @@ async function main() {
   const summary = $("summary").textContent.replace(/\s+/g, " ");
   check("analyze: summary", /synced by audio/i.test(summary), summary.slice(0, 160));
   check("settings: bad confidence reset to default", $("autoConf").value === "0.5" && /setting autoConf: "-13"/.test($("log").textContent), $("autoConf").value);
+  check("analyze: proxy used for offline original", /analysed from their proxies/.test(summary), (summary.match(/\d+ clip\(s\) analysed[^.]*/) || [""])[0]);
+  check("analyze: missing file explained", /1 file\(s\) can't be read/.test(summary) && /\/Volumes\/T7/.test(summary), (summary.match(/\d+ file\(s\) can't be read[^.]*\./) || [""])[0]);
   check("analyze: drift reported for full-length recorder", /clock drifts -40\.\d ppm/.test(summary), (summary.match(/[^.]*clock drifts[^.]*/) || [""])[0]);
   check("analyze: review list shows unmatched + timestamp clips", !$("reviewSection").classList.contains("hidden"),
     $("reviewList").textContent.replace(/\s+/g, " ").slice(0, 200));
@@ -128,7 +136,7 @@ async function main() {
     w.document.querySelector(`input[name="output"][value="${mode}"]`).checked = true;
     await click("buildBtn", () => !busy("buildBtn"));
     const made = mock.sequences.slice(before);
-    const err = [...$("summary").querySelectorAll(".row.err")].map((r) => r.textContent.trim()).join(" | ");
+    const err = [...$("summary").querySelectorAll(".row.err:not(.media)")].map((r) => r.textContent.trim()).join(" | ");
     check(`${mode}: built without errors`, !err && made.length > 0, err || `${made.length} sequence(s)`);
     for (const seq of made) verifySequence(mode, seq, false);
   }
@@ -190,8 +198,25 @@ async function main() {
   // ---- timeline checks ----
   function verifySequence(mode, seq, cuts) {
     const tag = `${mode}/${seq.name}`;
-    const vItems = seq.video.flatMap((t) => t.items);
-    const aItems = seq.audio.flatMap((t) => t.items);
+    const UNSYNCED = new Set(["other.wav", "lost.MOV"]);
+    const allV = seq.video.flatMap((t) => t.items);
+    const allA = seq.audio.flatMap((t) => t.items);
+    const isUns = (i) => UNSYNCED.has(i.clip.name);
+    if (seq.name.endsWith("not synced")) {
+      const names = [...allV, ...allA].map((i) => i.clip.name).sort().join(",");
+      check(`${tag}: holds the clips that didn't sync`, names === "lost.MOV,other.wav", names);
+      check(`${tag}: marked`, seq.markers.some((m) => m.name === "Not synced"));
+      return;
+    }
+    // In the synced timeline, not-synced clips come after everything else.
+    const uns = [...allV, ...allA].filter(isUns);
+    const syncedEnd = Math.max(...[...allV, ...allA].filter((i) => !isUns(i)).map((i) => i.end));
+    if (mode === "timeline" || mode === "driftcuts") {
+      check(`${tag}: not-synced clips placed after the synced material`, uns.length === 2 && uns.every((i) => i.start >= syncedEnd - 1e-6), uns.map((i) => `${i.clip.name}@${i.start.toFixed(1)}`).join(" "));
+      check(`${tag}: not-synced area marked`, seq.markers.some((m) => m.name === "Not synced" && m.time >= syncedEnd - 1e-6));
+    }
+    const vItems = allV.filter((i) => !isUns(i));
+    const aItems = allA.filter((i) => !isUns(i));
     if (!vItems.length && aItems.some((i) => i.clip.sequence)) return;
     if (seq.name.endsWith("master")) {
       check(`${tag}: nests take sequences`, vItems.length > 0 && vItems.every((i) => i.clip.sequence), `${vItems.length} nested`);
@@ -207,7 +232,7 @@ async function main() {
     const names = new Map();
     for (const it of vItems) names.set(it.clip.name, (names.get(it.clip.name) || 0) + 1);
     check(`${tag}: each video clip once`, [...names.values()].every((n) => n === 1), JSON.stringify([...names]));
-    check(`${tag}: unrelated clip not placed`, !aItems.some((i) => i.clip.name === "other.wav"));
+    check(`${tag}: unrelated clip not mixed into the synced material`, !aItems.some((i) => i.clip.name === "other.wav"));
     for (const it of vItems) {
       const want = truth[it.clip.name];
       const got = it.start - it.inPt - zero;

@@ -50,6 +50,7 @@ struct Node {
   double duration = 0.0;
   std::vector<float> coarse;    // DC removed
   std::vector<float> envelope;  // 20 Hz RMS, for quiet-spot cut snapping
+  double decodedDuration = 0.0; // measured from the file itself
   std::unique_ptr<SpectrumCache> spec;  // long files only
 };
 
@@ -116,9 +117,49 @@ double fileStartTime(const std::string& path, double duration) {
 
 }  // namespace
 
-AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
+namespace {
+
+bool readable(const std::string& path) {
+  if (path.empty()) return false;
+#ifdef _WIN32
+  return GetFileAttributesW(widen(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+  struct stat st;
+  return stat(path.c_str(), &st) == 0;
+#endif
+}
+
+}  // namespace
+
+AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
                              const AnalyzeOptions& opts,
                              const ProgressFn& progress) {
+  // Use the original media when it's there, otherwise the proxy (originals
+  // on a disconnected drive are common when editing with proxies).
+  std::vector<ClipInfo> clips = clipsIn;
+  std::vector<std::string> source(clips.size(), "original");
+  {
+    int proxies = 0, missing = 0;
+    std::string firstMissing;
+    for (size_t i = 0; i < clips.size(); ++i) {
+      if (readable(clips[i].path)) continue;
+      if (readable(clips[i].altPath)) {
+        logInfo("original offline, using proxy: " + clips[i].path + " -> " + clips[i].altPath);
+        clips[i].path = clips[i].altPath;
+        source[i] = "proxy";
+        ++proxies;
+      } else {
+        source[i] = "missing";
+        clips[i].hasAudio = false;  // nothing to read; may still be placed by time
+        if (firstMissing.empty()) firstMissing = clips[i].path;
+        ++missing;
+      }
+    }
+    if (proxies) logInfo(std::to_string(proxies) + " clip(s) analysed from proxies");
+    if (missing)
+      logWarn(std::to_string(missing) + " file(s) not found (offline drive or moved media?), e.g. " + firstMissing);
+  }
+
   auto report = [&](double f, const std::string& m) {
     if (progress) progress(f, m);
   };
@@ -170,7 +211,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
   // runs on the file timeline, Premiere counts from the first frame.
   std::vector<double> videoStart(clips.size(), 0.0);
   parallelFor(clips.size(), opts.threads, [&](size_t i) {
-    if (clips[i].isVideo) videoStart[i] = videoStartTime(clips[i].path);
+    if (clips[i].isVideo && source[i] != "missing") videoStart[i] = videoStartTime(clips[i].path);
   });
 
   // ---- 2. Decode every lead file once at the coarse rate. ----
@@ -188,8 +229,10 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
         logWarn("no usable audio in " + clips[node.lead].path + ": " + e.what());
         node.coarse.clear();  // unreadable audio -> treated as silent
       }
-      node.duration = std::max(node.duration,
-                               double(node.coarse.size()) / opts.match.coarseRate);
+      node.decodedDuration = double(node.coarse.size()) / opts.match.coarseRate;
+      // The file's real length wins over the caller's (which may be trimmed
+      // in/out marks); the caller's is only for media we can't read.
+      if (node.decodedDuration > 0) node.duration = node.decodedDuration;
       removeDc(node.coarse);
       node.envelope = computeEnvelope(node.coarse, opts.match.coarseRate, 0.05);
       // Files over 5 minutes get matched against many clips: cache their FFT.
@@ -221,6 +264,11 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     logInfo("decoded " + std::to_string(nodes.size()) + " nodes (" + std::to_string(withAudio) +
             " with audio) in " + elapsed());
   }
+
+  auto mediaDuration = [&](size_t i) {
+    const Node& nd = nodes[nodeOf[i]];
+    return nd.decodedDuration > 0 ? nd.decodedDuration : std::max(0.0, clips[i].duration);
+  };
 
   // ---- 3. Match every cross-device pair of nodes. ----
   struct Pair { int a, b; };
@@ -437,6 +485,8 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
   for (size_t i = 0; i < clips.size(); ++i) {
     auto& r = out.clips[i];
     r.id = clips[i].id;
+    r.source = source[i];
+    r.duration = mediaDuration(i);
     const int n = nodeOf[i];
     if (comp[n] < 0) continue;
     r.component = comp[n];
@@ -468,8 +518,9 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     withTs = clips;
     for (size_t i = 0; i < withTs.size(); ++i)
       if (withTs[i].timestamp < 0) {
-        double dur = withTs[i].duration > 0 ? withTs[i].duration : nodes[nodeOf[i]].duration;
-        withTs[i].timestamp = fileStartTime(withTs[i].path, dur);
+        double dur = mediaDuration(i);
+        // A proxy's file time is when it was rendered, not recorded.
+        if (source[i] == "original") withTs[i].timestamp = fileStartTime(withTs[i].path, dur);
       }
   }
   const std::vector<ClipInfo>& tclips = anyMissing ? withTs : clips;
@@ -492,7 +543,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
   for (size_t i = 0; i < clips.size(); ++i) {
     const auto& r = out.clips[i];
     if (r.method != "audio" && r.method != "manual") continue;
-    const double dur = clips[i].duration > 0 ? clips[i].duration : nodes[nodeOf[i]].duration;
+    const double dur = mediaDuration(i);
     auto it = span.find(r.component);
     if (it == span.end()) span[r.component] = {r.position, r.position + dur};
     else it->second = {std::min(it->second.first, r.position), std::max(it->second.second, r.position + dur)};
@@ -522,7 +573,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     }
     // A camera with an unset clock would land days or years away; leave
     // it unplaced rather than stretch the timeline.
-    const double dur = clips[i].duration > 0 ? clips[i].duration : nodes[nodeOf[i]].duration;
+    const double dur = mediaDuration(i);
     auto sp = span.find(r.component);
     if (sp != span.end() && (r.position + dur < sp->second.first - 3600.0 ||
                              r.position > sp->second.second + 3600.0)) {
@@ -544,7 +595,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clips,
     auto& r = out.clips[i];
     if (r.component < 0) continue;
     const int n = nodeOf[i];
-    const double dur = clips[i].duration > 0 ? clips[i].duration : nodes[n].duration;
+    const double dur = mediaDuration(i);
     const double e = r.method == "audio" || r.method == "manual" ? eps[n] : 0.0;
     if (std::fabs(e) * dur <= 2.0 * opts.driftTolerance) {
       // Align at the middle so the error is split between both ends.

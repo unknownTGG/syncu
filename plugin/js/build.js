@@ -45,7 +45,10 @@ Syncu.build = (() => {
     const warnings = [];
     const info = new Map(clips.map((c) => [c.id, c]));
     const placed = result.clips.filter((r) => r.method !== "none" && r.segments.length);
-    const unplaced = result.clips.filter((r) => r.method === "none").map((r) => r.id);
+    // Clips that didn't sync still go on the timeline ("not synced" area)
+    // when we know their length; only clips with no known length are skipped.
+    const unsyncedRes = result.clips.filter((r) => r.method === "none" && r.duration > 0 && info.has(r.id));
+    const unplaced = result.clips.filter((r) => r.method === "none" && !(r.duration > 0)).map((r) => r.id);
 
     // Items in timeline seconds (component-local).
     const comps = new Map();
@@ -67,6 +70,25 @@ Syncu.build = (() => {
         start: segs[0].pos, end: segs[segs.length - 1].pos + (segs[segs.length - 1].srcOut - segs[segs.length - 1].srcIn),
       });
     }
+
+    // Not-synced clips: back to back per device (2 s apart), all devices
+    // starting together, positions relative to the area's start.
+    function unsyncedItems() {
+      const cursor = new Map();
+      const out = [];
+      for (const r of unsyncedRes) {
+        const c = info.get(r.id);
+        const at = ceilFrame(cursor.get(c.device) || 0, frameTicks);
+        cursor.set(c.device, at + r.duration + 2);
+        out.push({
+          id: r.id, clip: c, isVideo: c.isVideo, review: true, method: "none", unsynced: true,
+          segs: [{ srcIn: 0, srcOut: r.duration, pos: at }], vpos: c.isVideo ? at : null,
+          start: at, end: at + r.duration,
+        });
+      }
+      return out;
+    }
+    const unsynced = unsyncedItems();
 
     // Shift a component so its longest video lands exactly on a frame; then
     // every other video is snapped to the nearest frame (picture can't sit
@@ -173,6 +195,7 @@ Syncu.build = (() => {
         const it = items.find((i) => i.id === p.clipId);
         if (!it || !it.review || flagged.has(it.id)) continue;
         flagged.add(it.id);
+        if (it.unsynced) continue; // the area has one marker of its own
         markers.push({ name: `Syncu: check ${it.clip.name}`, time: p.pos, comment: `placed by ${it.method}; verify sync` });
       }
       const settingsClipId = vPlacements.length
@@ -208,7 +231,18 @@ Syncu.build = (() => {
         segs: it.segs.map((s) => ({ ...s, pos: s.pos + it._off })),
         start: it.start + it._off, end: it.end + it._off,
       }));
+      // Not-synced clips after everything else, behind a marker.
+      const unsyncedAt = cursor;
+      for (const it of unsynced)
+        shifted.push({
+          ...it,
+          vpos: it.vpos === null ? null : it.vpos + unsyncedAt,
+          segs: it.segs.map((sg) => ({ ...sg, pos: sg.pos + unsyncedAt })),
+          start: it.start + unsyncedAt, end: it.end + unsyncedAt,
+        });
       const seqPlan = makeSequence(`${label} - synced`, shifted, 0);
+      if (unsynced.length)
+        seqPlan.markers.push({ name: "Not synced", time: unsyncedAt, comment: `${unsynced.length} clip(s) Syncu couldn't sync — place by hand` });
       compIds.forEach((c, n) => {
         const t = Math.min(...shifted.filter((i) => i.clip && comps.get(c).some((x) => x.id === i.id)).map((i) => i.start));
         if (compIds.length > 1 && isFinite(t)) seqPlan.markers.push({ name: `Scene ${n + 1}`, time: t, comment: "" });
@@ -249,8 +283,17 @@ Syncu.build = (() => {
       }
     }
 
+    // Other modes: not-synced clips get a sequence of their own.
+    if (opts.mode !== "timeline" && unsynced.length) {
+      const sq = makeSequence(`${label} - not synced`, unsynced, 0);
+      sq.markers.push({ name: "Not synced", time: 0, comment: `${unsynced.length} clip(s) Syncu couldn't sync — place by hand` });
+      sq.unsyncedOnly = true;
+      sequences.push(sq);
+    }
+
     return {
       frameTicks,
+      unsynced: unsynced.map((u) => u.id),
       sequences,
       master: opts.mode === "takes" ? { name: `${label} - master` } : null,
       unplaced,
@@ -336,7 +379,7 @@ Syncu.build = (() => {
         }
       }
       await pp.addMarkers(proj, seq, sp.markers || []);
-      made.push(seq);
+      if (!sp.unsyncedOnly) made.push(seq); // the master nests takes only
     }
 
     if (plan.master && made.length) {
