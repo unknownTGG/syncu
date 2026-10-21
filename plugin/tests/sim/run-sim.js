@@ -66,7 +66,9 @@ async function main() {
   helper.stderr.on("data", (d) => (helperErr += d));
   await sleep(500);
 
-  const mock = createMock({ media });
+  const SUBFRAME = process.env.MOCK_SUBFRAME || "clone";
+  console.log(`mock Premiere: sub-frame mode "${SUBFRAME}"`);
+  const mock = createMock({ media, subFrame: SUBFRAME });
   const html = fs.readFileSync(path.join(PLUGIN, "index.html"), "utf8").replace(/<script[^>]*><\/script>/g, "");
   const dom = new JSDOM(html, { runScripts: "outside-only" });
   const w = dom.window;
@@ -110,23 +112,41 @@ async function main() {
   const devRows = $("deviceList").querySelectorAll(".row").length;
   check("scan: 5 devices", devRows === 5, `${devRows} rows`);
 
-  // ---- Analyze ----
+  // ---- Analyze (with a garbage setting, like the -13 seen in real Premiere) ----
+  $("autoConf").value = "-13";
   await click("analyzeBtn", () => !busy("analyzeBtn"));
   const summary = $("summary").textContent.replace(/\s+/g, " ");
   check("analyze: summary", /synced by audio/.test(summary), summary.slice(0, 160));
+  check("settings: bad confidence reset to default", $("autoConf").value === "0.5" && /setting autoConf: "-13"/.test($("log").textContent), $("autoConf").value);
+  check("analyze: drift reported for full-length recorder", /clock drifts -40\.\d ppm/.test(summary), (summary.match(/[^.]*clock drifts[^.]*/) || [""])[0]);
   check("analyze: review list shows unmatched + timestamp clips", !$("reviewSection").classList.contains("hidden"),
     $("reviewList").textContent.replace(/\s+/g, " ").slice(0, 200));
 
   // ---- Build, each mode ----
   for (const mode of ["timeline", "multicam", "takes"]) {
     const before = mock.sequences.length;
-    $("outputMode").value = mode;
+    w.document.querySelector(`input[name="output"][value="${mode}"]`).checked = true;
     await click("buildBtn", () => !busy("buildBtn"));
     const made = mock.sequences.slice(before);
     const err = [...$("summary").querySelectorAll(".row.err")].map((r) => r.textContent.trim()).join(" | ");
     check(`${mode}: built without errors`, !err && made.length > 0, err || `${made.length} sequence(s)`);
-    for (const seq of made) verifySequence(mode, seq);
+    for (const seq of made) verifySequence(mode, seq, false);
   }
+
+  // ---- Opt-in drift cuts: re-analyze and build a synced timeline ----
+  $("driftCuts").checked = true;
+  await click("analyzeBtn", () => !busy("analyzeBtn"));
+  {
+    const before = mock.sequences.length;
+    w.document.querySelector('input[name="output"][value="timeline"]').checked = true;
+    await click("buildBtn", () => !busy("buildBtn"));
+    const made = mock.sequences.slice(before);
+    check("drift cuts: built", made.length === 1);
+    for (const seq of made) verifySequence("driftcuts", seq, true);
+  }
+  $("driftCuts").checked = false;
+  const accLines = $("log").textContent.split("\n").filter((l) => /audio placed sample-accurately|audio placement accuracy|sub-frame/.test(l));
+  check(`audio accuracy logged (${SUBFRAME})`, accLines.length > 0, accLines.slice(-2).map((l) => l.slice(13, 140)).join(" | "));
 
   // ---- Self-test ----
   const clipsInMock = [...mock.bins.values()].flatMap((b) => b.children);
@@ -135,7 +155,11 @@ async function main() {
   const logText = $("log").textContent;
   const selfLines = logText.split("\n").filter((l) => l.includes("self-test:"));
   check("self-test ran", selfLines.some((l) => l.includes("done")), `${selfLines.length} lines`);
-  check("self-test: all OK in sim", !selfLines.some((l) => l.includes("FAIL")), selfLines.filter((l) => l.includes("FAIL")).join(" | "));
+  // With no sub-frame support at all, "exact audio placement" is expected to FAIL.
+  const fails = selfLines.filter((l) => l.includes("FAIL") && !(SUBFRAME === "none" && l.includes("exact audio placement")));
+  check("self-test: all OK in sim", fails.length === 0, fails.join(" | "));
+  const exactLine = selfLines.find((l) => l.includes("exact audio placement")) || "";
+  check("self-test: reports exact placement result", !!exactLine, exactLine.slice(13, 200));
 
   // ---- Report ----
   await click("copyReportBtn", () => !busy("copyReportBtn"));
@@ -164,7 +188,7 @@ async function main() {
   process.exit(failed ? 1 : 0);
 
   // ---- timeline checks ----
-  function verifySequence(mode, seq) {
+  function verifySequence(mode, seq, cuts) {
     const tag = `${mode}/${seq.name}`;
     const vItems = seq.video.flatMap((t) => t.items);
     const aItems = seq.audio.flatMap((t) => t.items);
@@ -192,16 +216,26 @@ async function main() {
       const fr = (it.start * 254016000000) / seq.frameTicks;
       if (Math.abs(fr - Math.round(fr)) > 1e-6) check(`${tag}: ${it.clip.name} on frame`, false);
     }
-    // Recorder pieces: exact sync at their middle and edges, against the camera's actual frame.
+    // Recorder: against the reference camera's actual frame. Sample-exact
+    // unless the mock (like a worst-case Premiere) allows no sub-frame edits.
+    const exactTol = SUBFRAME === "none" ? halfFrame : 0.00005;
     const rec = aItems.filter((i) => i.clip.name === "recdrift.wav").sort((a, b) => a.start - b.start);
-    check(`${tag}: recorder placed`, rec.length > 0, `${rec.length} piece(s)`);
-    let worst = 0;
-    for (const p of rec)
-      for (const t of [p.inPt + 0.01, 0.5 * (p.inPt + p.outPt), p.outPt - 0.01]) {
-        const tl = p.start + (t - p.inPt) - zero;
-        worst = Math.max(worst, Math.abs(tl - recTruth(t)));
-      }
-    check(`${tag}: recorder sync ≤ 2.5 ms everywhere`, worst <= 0.0025, `worst ${(worst * 1000).toFixed(3)} ms`);
+    const recDur = media.find((m) => m.name === "recdrift.wav").duration;
+    const errAt = (p, t) => Math.abs(p.start + (t - p.inPt) - zero - recTruth(t));
+    if (!cuts) {
+      const r = rec[0];
+      check(`${tag}: recorder is one full-length clip`, rec.length === 1 && Math.abs(r.inPt) < 1e-9 && Math.abs(r.outPt - recDur) < 0.05,
+        rec.map((p) => `${p.inPt.toFixed(2)}-${p.outPt.toFixed(2)}`).join(","));
+      const mid = errAt(r, 0.5 * recDur);
+      check(`${tag}: recorder in sync at its middle`, mid <= exactTol, `${(mid * 1000).toFixed(4)} ms (tol ${(exactTol * 1000).toFixed(3)})`);
+      const ends = Math.max(errAt(r, 0.01), errAt(r, recDur - 0.01));
+      check(`${tag}: recorder ends drift as reported (~13 ms)`, ends <= 0.0135 + exactTol, `${(ends * 1000).toFixed(2)} ms`);
+    } else {
+      check(`${tag}: recorder cut into pieces`, rec.length > 1, `${rec.length} piece(s)`);
+      let worst = 0;
+      for (const p of rec) for (const t of [p.inPt + 0.01, 0.5 * (p.inPt + p.outPt), p.outPt - 0.01]) worst = Math.max(worst, errAt(p, t));
+      check(`${tag}: recorder sync ≤ 2.5 ms everywhere`, worst <= 0.0025 + exactTol, `worst ${(worst * 1000).toFixed(3)} ms`);
+    }
     const recTracks = new Set(rec.map((p) => p.trackIndex));
     check(`${tag}: recorder on one track`, recTracks.size === 1, [...recTracks].join(","));
     for (let i = 1; i < rec.length; i++)

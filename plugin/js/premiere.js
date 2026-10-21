@@ -238,29 +238,88 @@ Syncu.pp = (() => {
     return track.getTrackItems(T, false);
   }
 
-  // Place source range [srcIn, srcOut] of an audio clip at timeline `pos`
-  // on audio track `track`: staged full-length on an empty scratch track (so
-  // nothing gets overwritten), trimmed, cloned into place, scratch removed.
-  async function placeAudioPiece(proj, seq, projectItem, srcIn, srcOut, pos, track, stagingTrack) {
-    transact(proj, "Syncu: stage piece", () => [overwriteAction(seq, projectItem, pos - srcIn, 0, stagingTrack)]);
+  // Where an audio track item puts its source time zero on the timeline.
+  async function zeroOf(ti) {
+    return seconds(await ti.getStartTime()) - seconds(await ti.getInPoint());
+  }
+
+  // The track item on `track` that holds `projectItem` starting nearest `pos`.
+  async function findPlaced(seq, track, projectItem, pos) {
+    let best = null;
+    let bestD = Infinity;
+    for (const ti of await trackItemsOn(seq, "audio", track)) {
+      const pi = await ti.getProjectItem();
+      if (pi !== projectItem && pi && projectItem && pi.name !== projectItem.name) continue;
+      const d = Math.abs(seconds(await ti.getStartTime()) - pos);
+      if (d < bestD) (bestD = d), (best = ti);
+    }
+    return best;
+  }
+
+  // Which sub-frame method works on this Premiere (learned on first use).
+  const subFrame = { method: null, tried: [] };
+
+  // Place source range [srcIn, srcOut] of an audio clip so source time
+  // srcIn lands exactly at timeline `pos` on audio `track` (sub-frame).
+  // Premiere snaps placement to frames, so: stage on an empty scratch track,
+  // trim, measure where it really landed, then clone it to the real track
+  // with the leftover fraction of a frame as the clone's time offset. If
+  // clones snap too, nudge with a sub-frame move. Returns the remaining
+  // error in seconds (0 = sample accurate).
+  async function placeAudioExact(proj, seq, projectItem, srcIn, srcOut, pos, track, stagingTrack, fullLength) {
+    const wantZero = pos - srcIn;
+    transact(proj, "Syncu: stage audio", () => [overwriteAction(seq, projectItem, wantZero, 0, stagingTrack)]);
     const staged = await trackItemsOn(seq, "audio", stagingTrack);
     if (staged.length !== 1) throw new Error(`staging track A${stagingTrack + 1} has ${staged.length} items (expected 1)`);
-    const ti = staged[0];
-    transact(proj, "Syncu: trim piece", () => [ti.createSetInPointAction(ticks(srcIn)), ti.createSetOutPointAction(ticks(srcOut))]);
-    // Whether trimming the in-point moves the clip's start isn't documented:
-    // measure where the trimmed piece sits and let the clone fix any gap.
-    const trimmed = (await trackItemsOn(seq, "audio", stagingTrack))[0];
-    const delta = pos - seconds(await trimmed.getStartTime());
+    let ti = staged[0];
+    if (!fullLength) {
+      transact(proj, "Syncu: trim audio", () => [ti.createSetInPointAction(ticks(srcIn)), ti.createSetOutPointAction(ticks(srcOut))]);
+      ti = (await trackItemsOn(seq, "audio", stagingTrack))[0];
+    }
+    const stagedErr = (await zeroOf(ti)) - wantZero; // what Premiere's snapping did
     const editor = ppro.SequenceEditor.getEditor(seq);
-    transact(proj, "Syncu: place piece", () => [
-      editor.createCloneTrackItemAction(trimmed, ticks(delta), 0, track - stagingTrack, false, false),
+    transact(proj, "Syncu: place audio", () => [
+      editor.createCloneTrackItemAction(ti, ticks(-stagedErr), 0, track - stagingTrack, false, false),
     ]);
-    await removeItems(proj, seq, [trimmed], "Syncu: clear staging");
-    // Verify: a clip on the target track should now start at pos.
-    const placed = (await trackItemsOn(seq, "audio", track));
-    let best = Infinity;
-    for (const p of placed) best = Math.min(best, Math.abs(seconds(await p.getStartTime()) - pos));
-    if (best > 0.001) log("warn", `piece on A${track + 1} landed ${(best * 1000).toFixed(2)} ms from target ${pos.toFixed(4)}`);
+    await removeItems(proj, seq, [ti], "Syncu: clear staging");
+
+    let placed = await findPlaced(seq, track, projectItem, pos);
+    if (!placed) throw new Error(`audio clip not found on A${track + 1} after placing`);
+    let err = (await zeroOf(placed)) - wantZero;
+    const tol = 0.5 / 48000;
+    if (Math.abs(err) <= tol) {
+      if (!subFrame.method && Math.abs(stagedErr) > tol) {
+        subFrame.method = "clone offset";
+        log(`sub-frame audio: clone with offset works (Premiere snapped by ${(stagedErr * 1000).toFixed(3)} ms, corrected)`);
+      }
+      return 0;
+    }
+    // Clone snapped as well: try a sub-frame move on the placed clip.
+    if (subFrame.method !== "none") {
+      try {
+        transact(proj, "Syncu: nudge audio", () => [placed.createMoveAction(ticks(-err))]);
+        placed = await findPlaced(seq, track, projectItem, pos);
+        const err2 = (await zeroOf(placed)) - wantZero;
+        if (Math.abs(err2) <= tol) {
+          if (subFrame.method !== "move") log("sub-frame audio: clone snapped, sub-frame move works");
+          subFrame.method = "move";
+          return 0;
+        }
+        err = err2;
+      } catch (e) {
+        log("warn", `sub-frame move failed: ${Syncu.log.errText(e)}`);
+      }
+      if (subFrame.method !== "none") {
+        log("warn", `sub-frame audio placement isn't possible on this Premiere (left ${(err * 1000).toFixed(2)} ms off); audio is frame-accurate only. Please send a report.`);
+        subFrame.method = "none";
+      }
+    }
+    return err;
+  }
+
+  // Kept for callers/tests: a trimmed piece is just an exact placement.
+  async function placeAudioPiece(proj, seq, projectItem, srcIn, srcOut, pos, track, stagingTrack) {
+    return placeAudioExact(proj, seq, projectItem, srcIn, srcOut, pos, track, stagingTrack, false);
   }
 
   async function muteAudioTrack(seq, index) {
@@ -346,7 +405,8 @@ Syncu.pp = (() => {
       transact(proj, "test overwrite audio", () => [overwriteAction(seq, audio.projectItem, t, 0, 3)]);
       const items = await trackItemsOn(seq, "audio", 3);
       const got = seconds(await items[0].getStartTime());
-      rec("audio sub-frame placement", Math.abs(got - t) < 1 / 48000, `asked ${t}, got ${got.toFixed(7)} (Δ ${((got - t) * 1000).toFixed(3)} ms)`);
+      // Premiere snaps direct placement to frames; exact placement below fixes it.
+      rec("audio direct placement (info)", true, `asked ${t}, got ${got.toFixed(7)} (snapped by ${((got - t) * 1000).toFixed(3)} ms)`);
     });
 
     await step("video placement", async () => {
@@ -376,7 +436,8 @@ Syncu.pp = (() => {
       transact(proj, "test clone", () => [editor.createCloneTrackItemAction(it, ticks(0), 0, -2, false, false)]);
       const moved = await trackItemsOn(seq, "audio", 1);
       const ms = moved.length ? seconds(await moved[0].getStartTime()) : NaN;
-      rec("clone to other track", moved.length === 1 && Math.abs(ms - s) < 1e-6, `${moved.length} item(s) on A2, start ${ms.toFixed(6)} vs ${s.toFixed(6)}`);
+      const frame = (await frameTicks(seq)) / TICKS_PER_SECOND;
+      rec("clone to other track", moved.length === 1 && Math.abs(ms - s) <= frame, `${moved.length} item(s) on A2, start ${ms.toFixed(6)} vs ${s.toFixed(6)} (Δ ${((ms - s) * 1000).toFixed(3)} ms)`);
     });
 
     await step("move", async () => {
@@ -385,6 +446,38 @@ Syncu.pp = (() => {
       transact(proj, "test move", () => [it.createMoveAction(ticks(0.5))]);
       const s1 = seconds(await (await trackItemsOn(seq, "audio", 3))[0].getStartTime());
       rec("move", Math.abs(s1 - s0) > 1e-6, `start ${s0.toFixed(4)} -> ${s1.toFixed(4)} (by: ${Math.abs(s1 - s0 - 0.5) < 1e-4}, to: ${Math.abs(s1 - 0.5) < 1e-4})`);
+    });
+
+    // Sub-frame experiments: each primitive on its own, then the real routine.
+    const frac = 0.0123457; // not a multiple of any frame duration
+    await step("sub-frame move (info)", async () => {
+      transact(proj, "test sub-frame move: place", () => [overwriteAction(seq, audio.projectItem, 12, 0, 2)]);
+      const it = (await trackItemsOn(seq, "audio", 2))[0];
+      const s0 = seconds(await it.getStartTime());
+      transact(proj, "test sub-frame move", () => [it.createMoveAction(ticks(frac))]);
+      const it2 = (await trackItemsOn(seq, "audio", 2))[0];
+      const moved = seconds(await it2.getStartTime()) - s0;
+      rec("sub-frame move (info)", true, `moved by ${(moved * 1000).toFixed(4)} ms, asked ${(frac * 1000).toFixed(4)} ms (${Math.abs(moved - frac) < 1e-6 ? "exact" : "snapped"})`);
+      await removeItems(proj, seq, await trackItemsOn(seq, "audio", 2));
+    });
+    await step("sub-frame clone (info)", async () => {
+      transact(proj, "test sub-frame clone: place", () => [overwriteAction(seq, audio.projectItem, 12, 0, 2)]);
+      const it = (await trackItemsOn(seq, "audio", 2))[0];
+      const s0 = seconds(await it.getStartTime());
+      const editor = ppro.SequenceEditor.getEditor(seq);
+      transact(proj, "test sub-frame clone", () => [editor.createCloneTrackItemAction(it, ticks(frac), 0, 2, false, false)]);
+      const c = (await trackItemsOn(seq, "audio", 4))[0];
+      const moved = c ? seconds(await c.getStartTime()) - s0 : NaN;
+      rec("sub-frame clone (info)", true, `offset ${(moved * 1000).toFixed(4)} ms, asked ${(frac * 1000).toFixed(4)} ms (${Math.abs(moved - frac) < 1e-6 ? "exact" : "snapped"})`);
+      await removeItems(proj, seq, [...(await trackItemsOn(seq, "audio", 2)), ...(await trackItemsOn(seq, "audio", 4))]);
+    });
+    await step("exact audio placement", async () => {
+      subFrame.method = null;
+      const target = 20.2345678;
+      const err = await placeAudioExact(proj, seq, audio.projectItem, 0, 0, target, 4, 2, true);
+      const err2 = await placeAudioExact(proj, seq, audio.projectItem, 1.0, 3.0, 40.8765432, 4, 2, false);
+      const ok = Math.abs(err) <= 1 / 48000 && Math.abs(err2) <= 1 / 48000;
+      rec("exact audio placement", ok, `full clip error ${(err * 1000).toFixed(4)} ms, trimmed piece error ${(err2 * 1000).toFixed(4)} ms, method: ${subFrame.method || "direct"}`);
     });
 
     await step("mute track", async () => {
@@ -410,7 +503,8 @@ Syncu.pp = (() => {
   return {
     ppro, ticks, seconds, project, transact, itemName,
     selectedClips, timelineClips, ensureBin, createSequence, allTrackItems, ensureTracks,
-    removeItems, overwriteAction, trackItemsOn, placeAudioPiece, muteAudioTrack, addMarkers,
+    removeItems, overwriteAction, trackItemsOn, placeAudioPiece, placeAudioExact, muteAudioTrack, addMarkers,
+    subFrame, zeroOf,
     frameTicks, runSelfTest, TICKS_PER_SECOND,
   };
 })();

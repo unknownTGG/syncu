@@ -36,7 +36,11 @@ class TickTime {
 }
 TickTime.TIME_ZERO = new TickTime(0);
 
-function createMock({ media, frameTicks = 10594584000 }) {
+// subFrame: what real Premiere might allow for sub-frame audio.
+//   "clone" - clone time offsets are exact; "move" - only moves are exact;
+//   "none"  - everything snaps to frames. Direct placement always snaps
+//   (that's what Premiere 26.5 does, per a real self-test).
+function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
   let locked = 0;
   const actionLog = [];
   const assertLocked = (what) => {
@@ -129,6 +133,7 @@ function createMock({ media, frameTicks = 10594584000 }) {
       assertLocked("createMoveAction");
       return action("move", () => {
         this.start += t.seconds;
+        if (subFrame !== "move") this.start = this.seq.snap(this.start);
       });
     }
   }
@@ -184,6 +189,9 @@ function createMock({ media, frameTicks = 10594584000 }) {
       for (const t of [...this.video, ...this.audio]) for (const i of t.items) e = Math.max(e, i.end);
       return TickTime.createWithSeconds(e);
     }
+    snap(sec) {
+      return (Math.round((sec * TPS) / this.frameTicks) * this.frameTicks) / TPS;
+    }
     track(kind, index) {
       const list = kind === "video" ? this.video : this.audio;
       if (index < list.length) return list[index];
@@ -191,10 +199,11 @@ function createMock({ media, frameTicks = 10594584000 }) {
       return list[list.length - 1];
     }
     // Overwrite: clear [start, end) on the track, then add the item.
-    put(kind, index, clip, start, inPt, outPt) {
+    put(kind, index, clip, start, inPt, outPt, exact = false) {
       const t = this.track(kind, index);
       const realIndex = (kind === "video" ? this.video : this.audio).indexOf(t);
-      if (kind === "video") start = Math.round((start * TPS) / this.frameTicks) * this.frameTicks / TPS;
+      // Premiere snaps placement to frames, audio included.
+      if (kind === "video" || !exact) start = this.snap(start);
       const end = start + (outPt - inPt);
       const keep = [];
       for (const it of t.items) {
@@ -296,7 +305,7 @@ function createMock({ media, frameTicks = 10594584000 }) {
         const list = item.kind === "video" ? seq.video : seq.audio;
         const target = item.trackIndex + (item.kind === "video" ? vOff : aOff);
         if (target < 0 || target >= list.length) throw new Error(`clone target track ${target} doesn't exist`);
-        seq.put(item.kind, target, item.clip, item.start + offset.seconds, item.inPt, item.outPt);
+        seq.put(item.kind, target, item.clip, item.start + offset.seconds, item.inPt, item.outPt, subFrame === "clone");
       });
     },
     createRemoveItemsAction(sel, ripple, mediaType, shift) {

@@ -18,14 +18,36 @@ window.Syncu = window.Syncu || {};
     return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   }
 
+  function radio(name, fallback) {
+    const el = document.querySelector(`input[name="${name}"]:checked`);
+    return (el && el.value) || fallback;
+  }
+
+  // Read a number field; out-of-range or garbage resets to the default (and
+  // says so), so a stray value can never reach the engine.
+  const warned = new Set();
+  function numberField(id, def, min, max) {
+    const raw = String($(id).value ?? "").trim().replace(",", ".");
+    const v = parseFloat(raw);
+    if (Number.isFinite(v) && v >= min && v <= max) return v;
+    if (!warned.has(id + raw)) {
+      warned.add(id + raw);
+      Syncu.log("warn", `setting ${id}: "${raw}" is not between ${min} and ${max}; using ${def}`);
+    }
+    $(id).value = String(def);
+    return def;
+  }
+
   function settings() {
     return {
-      source: document.querySelector('input[name="source"]:checked').value,
-      output: $("outputMode").value,
-      muteScratch: $("muteScratch").checked,
-      driftTolMs: Number($("driftTol").value),
-      autoConf: Number($("autoConf").value),
-      coarseRate: Number($("coarseRate").value),
+      source: radio("source", "bins"),
+      output: radio("output", "timeline"),
+      muteScratch: !!$("muteScratch").checked,
+      driftCuts: !!$("driftCuts").checked,
+      trimTakes: !!$("trimTakes").checked,
+      driftTolMs: numberField("driftTol", 2, 0.25, 50),
+      autoConf: numberField("autoConf", 0.5, 0.05, 0.99),
+      coarseRate: Number(radio("accuracy", "2000")) || 2000,
     };
   }
 
@@ -130,15 +152,18 @@ window.Syncu = window.Syncu || {};
   async function analyze() {
     if (!(await checkEngine())) throw new Error("The Syncu helper isn't ready (see the red pill at the top).");
     const st = settings();
+    Syncu.log(`settings: ${JSON.stringify(st)}`);
     const request = {
       clips: state.clips.map((c) => ({
         id: c.id, path: c.path, device: c.device, group: c.group || "",
         isVideo: !!c.isVideo, hasAudio: true,
       })),
       options: {
-        autoConfidence: st.autoConf || 0.5,
-        driftTolerance: (st.driftTolMs || 2) / 1000,
-        coarseRate: st.coarseRate || 2000,
+        autoConfidence: st.autoConf,
+        // Without drift cuts every file stays one full-length clip, aligned
+        // at its middle (a huge tolerance means "never cut").
+        driftTolerance: st.driftCuts ? st.driftTolMs / 1000 : 1e6,
+        coarseRate: st.coarseRate,
       },
       manualEdges: state.manualEdges,
     };
@@ -164,6 +189,16 @@ window.Syncu = window.Syncu || {};
       <div class="meta">${r.components} scene(s)${drift.length ? ` · drift corrected on ${drift.length} clip(s)` : ""}</div></div>`;
     for (const c of drift)
       html += `<div class="row"><div class="meta">${esc(clipName(c.id))}: ${c.driftPpm.toFixed(1)} ppm → ${c.segments.length} pieces</div></div>`;
+    // Full-length clips are aligned at their middle; say how far the ends drift.
+    for (const c of r.clips) {
+      if (c.segments.length !== 1) continue;
+      const s = c.segments[0];
+      const endErrMs = Math.abs(c.driftPpm) * 1e-6 * (s.end - s.start) * 0.5 * 1000;
+      if (endErrMs < 2) continue;
+      const msg = `${esc(clipName(c.id))}: clock drifts ${c.driftPpm.toFixed(1)} ppm — in sync at its middle, up to ${endErrMs.toFixed(0)} ms off at its ends. Turn on "Cut long recordings to fix clock drift" (Advanced) if that matters.`;
+      html += `<div class="row warn"><div class="meta">${msg}</div></div>`;
+      Syncu.log("warn", msg.replace(/<[^>]+>/g, ""));
+    }
     $("summary").innerHTML = html;
   }
 
@@ -207,8 +242,11 @@ window.Syncu = window.Syncu || {};
   // ---- 5. Build ----
   async function build() {
     const st = settings();
+    Syncu.log(`settings: ${JSON.stringify(st)}`);
     const makePlan = (frameTicks) => {
-      const plan = Syncu.build.planBuild(state.clips, state.result, { mode: st.output, frameTicks, muteScratch: st.muteScratch });
+      const plan = Syncu.build.planBuild(state.clips, state.result, {
+        mode: st.output, frameTicks, muteScratch: st.muteScratch, trimTakes: st.trimTakes,
+      });
       ctx.lastPlan = plan;
       return plan;
     };

@@ -66,7 +66,10 @@ jobs:
         shell: bash
         run: |
           cd plugin/tests/sim && npm install --no-audit --no-fund --silent
-          node run-sim.js "$RUNNER_TEMP/syncu-media" "$ENGINE"
+          # Each way Premiere might handle sub-frame audio edits.
+          for m in clone move none; do
+            MOCK_SUBFRAME=$m node run-sim.js "$RUNNER_TEMP/syncu-media" "$ENGINE"
+          done
 
       - name: Upload simulation report
         if: always()

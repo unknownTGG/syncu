@@ -65,7 +65,7 @@ const result = {
 const onFrame = (sec) => Math.abs(((sec * TPS) / FT) - Math.round((sec * TPS) / FT)) < 1e-6;
 
 for (const mode of ["timeline", "multicam", "takes"]) {
-  const plan = build.planBuild(clips, result, { mode, frameTicks: FT, muteScratch: true });
+  const plan = build.planBuild(clips, result, { mode, frameTicks: FT, muteScratch: true, trimTakes: mode === "takes" });
   const all = plan.sequences.flatMap((s) => s.placements);
   check(`${mode}: unplaced reported`, plan.unplaced.length === 1 && plan.unplaced[0] === "X");
   check(`${mode}: every video on a frame`, all.filter((p) => p.kind === "av").every((p) => onFrame(p.pos)));
@@ -96,6 +96,28 @@ for (const mode of ["timeline", "multicam", "takes"]) {
     check("takes: 2 takes (scene 1 merged by overlap, scene 2)", plan.sequences.length === 2, `${plan.sequences.length} takes`);
   }
 }
+
+// Full-length audio (default): every recorder file is placed whole, never cut.
+const fullResult = {
+  components: 1,
+  clips: [
+    { id: "A", method: "audio", component: 0, driftPpm: 0, segments: [seg(0, 100, 300.0)] },
+    { id: "B1", method: "audio", component: 0, driftPpm: 0, segments: [seg(0, 50, 320.0)] },
+    { id: "R", method: "audio", component: 0, driftPpm: -30, segments: [seg(0, 3600, 0.0)] },
+  ],
+};
+for (const mode of ["timeline", "multicam", "takes"]) {
+  const p = build.planBuild(clips, fullResult, { mode, frameTicks: FT });
+  const rec = p.sequences.flatMap((s) => s.placements).filter((x) => x.clipId === "R");
+  check(`full audio/${mode}: recorder placed whole`, rec.length === p.sequences.length && rec.every((x) => x.whole && x.srcIn === 0 && x.srcOut === 3600));
+  check(`full audio/${mode}: nothing before 0`, p.sequences.flatMap((s) => s.placements).every((x) => x.pos >= -1e-9));
+  const a = p.sequences[0].placements.find((x) => x.clipId === "A");
+  const r = rec[0];
+  check(`full audio/${mode}: sync kept`, Math.abs((a.pos - r.pos) - 300.0) < FT / TPS, `${(a.pos - r.pos).toFixed(4)}`);
+}
+const trimmed = build.planBuild(clips, fullResult, { mode: "takes", frameTicks: FT, trimTakes: true });
+const tr = trimmed.sequences[0].placements.find((x) => x.clipId === "R");
+check("trimTakes: recorder trimmed to the take", tr && !tr.whole && tr.srcOut - tr.srcIn < 110, tr && `${tr.srcIn.toFixed(1)}-${tr.srcOut.toFixed(1)}`);
 
 // Scratch audio tracks come after recorder tracks and get muted.
 const mc = build.planBuild(clips, result, { mode: "multicam", frameTicks: FT, muteScratch: true }).sequences[0];

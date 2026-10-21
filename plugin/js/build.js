@@ -78,9 +78,10 @@ Syncu.build = (() => {
       return ceilFrame(ref.vpos, frameTicks) - ref.vpos; // in [0, 1 frame)
     }
 
-    // Build one sequence from items shifted by `offset`, keeping only audio
-    // within [from, to] (timeline seconds before the shift).
-    function makeSequence(name, items, offset, from = -Infinity, to = Infinity) {
+    // Build one sequence from items shifted by `offset`. Audio overlapping
+    // [from, to] (timeline seconds before the shift) is kept; it's only
+    // trimmed to that range when `trim` is set (otherwise full length).
+    function makeSequence(name, items, offset, from = -Infinity, to = Infinity, trim = false) {
       const lanes = new Lanes();
       const placements = [];
       const vids = items.filter((i) => i.isVideo);
@@ -116,8 +117,10 @@ Syncu.build = (() => {
               s.pos = prevEnd;
             }
             prevEnd = s.pos + (s.srcOut - s.srcIn);
-            const lo = Math.max(s.srcIn, s.srcIn + (from - s.pos));
-            const hi = Math.min(s.srcOut, s.srcOut - (s.pos + (s.srcOut - s.srcIn) - to));
+            const sEnd = s.pos + (s.srcOut - s.srcIn);
+            if (sEnd <= from || s.pos >= to) continue;
+            const lo = trim ? Math.max(s.srcIn, s.srcIn + (from - s.pos)) : s.srcIn;
+            const hi = trim ? Math.min(s.srcOut, s.srcOut - (sEnd - to)) : s.srcOut;
             if (hi - lo < 0.5) continue;
             const pos = s.pos + (lo - s.srcIn) + offset;
             const lane = lanes.place("A:" + dev, pos, pos + (hi - lo), groupIndex.get(it.id) || 0);
@@ -237,9 +240,11 @@ Syncu.build = (() => {
           const from = t.start - handles;
           const to = t.end + handles;
           const members = items.filter((i) => (i.isVideo ? t.items.includes(i) : i.end > from && i.start < to));
-          // Shift so the take starts at 0, by a whole number of frames.
-          const off = ceilFrame(-from, frameTicks) + align;
-          sequences.push(makeSequence(`${label} - take ${String(takeNo).padStart(3, "0")}`, members, off, from, to));
+          // Shift so the earliest clip starts at 0 (the take itself, or a
+          // full-length recorder file that began before it), in whole frames.
+          const earliest = opts.trimTakes ? from : Math.min(from, ...members.map((i) => i.start));
+          const off = ceilFrame(-earliest, frameTicks) + align;
+          sequences.push(makeSequence(`${label} - take ${String(takeNo).padStart(3, "0")}`, members, off, from, to, !!opts.trimTakes));
         }
       }
     }
@@ -285,9 +290,12 @@ Syncu.build = (() => {
       const firstAudio = sp.placements.find((p) => p.kind === "audio");
       await pp.ensureTracks(proj, seq, nV, nA, settings.projectItem, firstAudio ? byId.get(firstAudio.clipId).projectItem : null);
 
-      // Video+audio and whole audio clips: one undo step.
-      const simple = sp.placements.filter((p) => p.kind === "av" || p.whole);
-      log(`"${sp.name}": placing ${simple.length} clip(s), ${sp.placements.length - simple.length} trimmed piece(s)`);
+      // Cameras (video + scratch audio) in one undo step. Video can only sit
+      // on frames anyway; recorder audio goes through exact placement below.
+      const exactAudio = pp.subFrame.method !== "none";
+      const simple = sp.placements.filter((p) => p.kind === "av" || (!exactAudio && p.whole));
+      const audioExact = sp.placements.filter((p) => p.kind === "audio" && !simple.includes(p));
+      log(`"${sp.name}": placing ${simple.length} clip(s) directly, ${audioExact.length} audio clip(s) sample-accurately`);
       pp.transact(proj, `Syncu: place clips (${sp.name})`, () =>
         simple.map((p) =>
           p.kind === "av"
@@ -298,7 +306,7 @@ Syncu.build = (() => {
       step += simple.length;
       if (onStep) onStep(step / total, sp.name);
 
-      // Check a few placements landed where planned.
+      // Check camera placements landed where planned (video snaps to frames).
       for (const p of simple.slice(0, 8)) {
         const items = p.kind === "av" ? await pp.trackItemsOn(seq, "video", p.videoTrack) : await pp.trackItemsOn(seq, "audio", p.audioTrack);
         const want = p.kind === "av" ? p.pos : p.pos - p.srcIn;
@@ -307,12 +315,19 @@ Syncu.build = (() => {
         if (best > 0.0005) log("warn", `${p.name}: expected at ${want.toFixed(4)} on ${p.kind === "av" ? "V" + (p.videoTrack + 1) : "A" + (p.audioTrack + 1)}, nearest clip is ${(best * 1000).toFixed(2)} ms away`);
       }
 
-      // Drift-cut / take-trimmed audio pieces.
-      for (const p of sp.placements.filter((x) => x.kind === "audio" && !x.whole)) {
-        await pp.placeAudioPiece(proj, seq, byId.get(p.clipId).projectItem, p.srcIn, p.srcOut, p.pos, p.audioTrack, sp.stagingTrack);
+      // Recorder audio: full-length clips (default) or drift/take pieces,
+      // each placed to the sample and verified.
+      let worst = 0;
+      for (const p of audioExact) {
+        const err = await pp.placeAudioExact(proj, seq, byId.get(p.clipId).projectItem, p.srcIn, p.srcOut, p.pos, p.audioTrack, sp.stagingTrack, p.whole);
+        worst = Math.max(worst, Math.abs(err));
         step++;
         if (onStep) onStep(step / total, sp.name);
       }
+      if (audioExact.length)
+        log(worst <= 1 / 48000
+          ? `"${sp.name}": audio placed sample-accurately (${audioExact.length} clip(s), method: ${pp.subFrame.method || "direct"})`
+          : `"${sp.name}": audio placement accuracy ${(worst * 1000).toFixed(2)} ms worst over ${audioExact.length} clip(s)`);
       for (const t of sp.muteTracks) {
         try {
           await pp.muteAudioTrack(seq, t);

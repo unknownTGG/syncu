@@ -5,7 +5,8 @@
 Syncu lines up footage from any number of cameras and audio recorders by listening to their audio. It works like [Syncaila](https://syncaila.com/), but runs as a panel in Premiere, so there's no XML export and re-import.
 
 - **Sample-accurate.** Audio is aligned to a fraction of a millisecond, not just to the nearest frame.
-- **Drift correction.** Recorders and cameras run on slightly different clocks. On long takes, Syncu cuts the recorder audio at quiet moments and re-aligns each piece.
+- **Full-length audio.** Recorder files are placed whole, never cut, so you can cut however you like afterwards.
+- **Drift aware.** Recorders and cameras run on slightly different clocks. Syncu measures the drift and tells you how far a long take drifts by its ends. It can also cut long recordings at quiet moments and re-align each piece, but only if you turn that on.
 - **Built for messy shoots.** It handles 3+ cameras, several recorders, start/stop clips, multi-file recorders (Zoom/Tascam), and silent clips (gimbal, drone, B-roll), which are placed by file time.
 - **Three outputs, chosen per project:** a synced timeline, multicam-ready source sequences, or per-take sequences plus a master timeline.
 - **Safe.** Everything goes into new sequences in a new bin. Your clips and existing sequences are never modified, and each build step can be undone.
@@ -147,7 +148,7 @@ If anything is uncertain, a **Review** section appears.
 Click **Build in Premiere**. Syncu creates a new bin called **`Syncu <date time>`** containing the new sequences. Track layout:
 
 - **Video:** V1 is the camera with the most footage, then the next camera, and so on.
-- **Audio:** recorder tracks come first (A1, A2, …). Camera scratch audio sits below, on **muted** tracks.
+- **Audio:** recorder tracks come first (A1, A2, …), each recorder file **full length**. Camera scratch audio sits below, on **muted** tracks.
 - **Markers** flag clips that need a look, and scene starts in the synced-timeline mode.
 
 Nothing in your existing project is changed. To start over, delete the Syncu bin.
@@ -160,7 +161,7 @@ Nothing in your existing project is changed. To start over, delete the Syncu bin
 |---|---|---|
 | **Synced timeline** | One sequence with every device on its own track. Separate scenes are laid back to back with a 10 s gap and a marker. | Quick review, simple edits, podcasts |
 | **Multicam-ready** | One aligned source sequence per scene. To make it a multicam clip, right-click it in the bin → *Create Multi-Camera Source Sequence*. Premiere doesn't let plugins do this step. | Multicam editing |
-| **Per-take + master** | One sequence per take (overlapping camera clips grouped, with 1 s handles), plus a master timeline with every take nested in order. | Narrative/interview shoots with many takes (Filmit-style) |
+| **Per-take + master** | One sequence per take (overlapping camera clips grouped), plus a master timeline with every take nested in order. Recorder files are placed full length in every take they cover. To trim them to each take (±1 s), turn on *Per-take mode: trim recorder audio* in Advanced. | Narrative/interview shoots with many takes (Filmit-style) |
 
 A **scene** is a group of clips that overlap in time. Separate events (morning interview, afternoon B-roll) become separate scenes.
 
@@ -172,8 +173,10 @@ Under **Output → Advanced**:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| **Drift tolerance (ms)** | 2 | How far a long recorder file may drift before it's cut and re-aligned. Smaller means more cuts. At a typical 30 ppm drift, 2 ms means one cut every ~2 minutes, always at the quietest nearby moment. |
-| **Auto-accept confidence** | 0.5 | Matches at or above this are used automatically. Matches between 0.15 and this value go to Review. Raise it if you see wrong matches; lower it if too much ends up in Review. |
+| **Cut long recordings to fix clock drift** | Off | Off: every recorder file stays one clip, in perfect sync at its middle. The summary says how far its ends drift (e.g. 30 ppm over a 30-min take is ±27 ms at the ends). On: long files are cut at quiet moments so every piece stays within the drift tolerance. |
+| **Drift tolerance (ms)** | 2 | Only used when cutting. Smaller means more cuts. At 30 ppm, 2 ms means one cut every ~2 minutes. |
+| **Per-take mode: trim recorder audio to each take** | Off | Off: full-length recorder files in every take. On: trimmed to the take ±1 s. |
+| **Auto-accept confidence** | 0.5 | Matches at or above this are used automatically. Matches between 0.15 and this value go to Review. Raise it if you see wrong matches; lower it if too much ends up in Review. Allowed range 0.05–0.99; anything else resets to 0.5, with a note in the log. |
 | **Search accuracy** | Normal | *Fast* / *Normal* / *High*: the sample rate of the first-pass search. *High* can help with very noisy or distant camera audio. Final accuracy is always sample-level either way. |
 
 ---
@@ -192,7 +195,8 @@ Under **Output → Advanced**:
 
 - **Audio vs. audio is sample-accurate.** In testing, typical error is 0.005–0.03 ms, and the worst case in a 161-clip shoot was 0.5 ms. That's tight enough to mix several mics without phasing.
 - **Video can only sit on frame boundaries.** Each scene's main camera lands exactly; other cameras are snapped to the nearest frame, so at most ½ frame of picture offset. No editor can avoid this. Recorder audio always keeps its exact position.
-- **Drift:** after correction, every recorder piece stays within the drift tolerance you set (default 2 ms).
+- **Premiere snaps clip placement to whole frames**, audio included. Syncu places each recorder clip, measures where Premiere actually put it, and shifts it by the leftover fraction of a frame. Every placement is verified, and the log states the accuracy achieved (e.g. *audio placed sample-accurately*). If your Premiere version doesn't allow sub-frame shifts, audio is frame-accurate (±½ frame) and the log says so.
+- **Drift:** with full-length clips (default), a recorder is exact at its middle and off by *drift × length ÷ 2* at its ends; the summary shows the number. With drift cuts on, every piece stays within the tolerance (default 2 ms).
 - **Silent clips** are only as accurate as the camera clock and file timestamps, typically within about a second. Memory cards formatted exFAT/FAT store file times to the nearest 2 seconds.
 
 ---

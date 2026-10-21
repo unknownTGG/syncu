@@ -21,23 +21,20 @@
 
   <section>
     <h2>2 · Output</h2>
-    <select id="outputMode">
-      <option value="timeline">Synced timeline (all devices, one sequence)</option>
-      <option value="multicam">Multicam-ready (one source sequence per scene)</option>
-      <option value="takes">Per-take sequences + master timeline</option>
-    </select>
+    <label class="radio"><input type="radio" name="output" value="timeline" checked /> Synced timeline (all devices, one sequence)</label>
+    <label class="radio"><input type="radio" name="output" value="multicam" /> Multicam-ready (one source sequence per scene)</label>
+    <label class="radio"><input type="radio" name="output" value="takes" /> Per-take sequences + master timeline</label>
     <label class="check"><input type="checkbox" id="muteScratch" checked /> Mute camera scratch audio</label>
     <details>
       <summary>Advanced</summary>
-      <label>Drift tolerance (ms) <input id="driftTol" type="number" value="2" step="0.5" min="0.25" /></label>
-      <label>Auto-accept confidence <input id="autoConf" type="number" value="0.5" step="0.05" min="0" max="1" /></label>
-      <label>Search accuracy
-        <select id="coarseRate">
-          <option value="1000">Fast</option>
-          <option value="2000" selected>Normal</option>
-          <option value="4000">High</option>
-        </select>
-      </label>
+      <label class="check"><input type="checkbox" id="driftCuts" /> Cut long recordings to fix clock drift</label>
+      <label>Drift tolerance (ms, when cutting) <input id="driftTol" type="text" value="2" /></label>
+      <label class="check"><input type="checkbox" id="trimTakes" /> Per-take mode: trim recorder audio to each take</label>
+      <label>Auto-accept confidence (0.05–0.99) <input id="autoConf" type="text" value="0.5" /></label>
+      <div class="hint">Search accuracy</div>
+      <label class="radio"><input type="radio" name="accuracy" value="1000" /> Fast</label>
+      <label class="radio"><input type="radio" name="accuracy" value="2000" checked /> Normal</label>
+      <label class="radio"><input type="radio" name="accuracy" value="4000" /> High</label>
     </details>
   </section>
 
