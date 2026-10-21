@@ -2,7 +2,7 @@
 // single "Copy report" gives the full picture (panel + helper).
 window.Syncu = window.Syncu || {};
 
-Syncu.VERSION = "0.1.4";
+Syncu.VERSION = "0.1.5";
 
 (() => {
   const lines = [];
@@ -118,10 +118,10 @@ Syncu.VERSION = "0.1.4";
       sec(`analysis (${r.components} scenes)`);
       for (const c of r.clips)
         out.push(`${c.id}\t${c.method}\tscene ${c.component}\tpos ${c.position.toFixed(6)}\tdrift ${c.driftPpm.toFixed(2)}ppm\tconf ${c.confidence.toFixed(2)}\tsegs ${c.segments.length}${c.needsReview ? "\tREVIEW" : ""}`);
-      out.push("-- matches (non-rejected) --");
-      for (const e of r.edges.filter((e) => e.status !== "rejected"))
+      out.push("-- accepted / rejected-as-inconsistent matches --");
+      for (const e of r.edges.filter((e) => e.status === "used" || e.status === "manual" || e.status === "outlier"))
         out.push(`${e.status}\t${e.a}<-${e.b}\toffset ${e.match.offset.toFixed(6)}\tconf ${e.match.confidence.toFixed(2)}\tratio ${e.match.peakRatio.toFixed(2)}\tcorr ${e.match.correlation.toFixed(2)}\tresid ${(e.residual * 1000).toFixed(3)}ms`);
-      out.push(`rejected pairs: ${r.edges.filter((e) => e.status === "rejected").length}`);
+      out.push(`review-level pairs: ${r.edges.filter((e) => e.status === "review").length}, rejected pairs: ${r.edges.filter((e) => e.status === "rejected").length}`);
     }
     if (st.manualEdges && st.manualEdges.length) {
       sec("manual fixes");
@@ -152,7 +152,7 @@ Syncu.VERSION = "0.1.4";
     try {
       const res = await fetch("http://127.0.0.1:47800/log", { headers: { "X-Syncu": "1" } });
       const j = await res.json();
-      out.push(...(j.lines || []).slice(-800));
+      out.push(...(j.lines || []).slice(-500));
     } catch (e) {
       out.push(`(unavailable: ${e.message || e})`);
     }

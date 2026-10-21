@@ -307,7 +307,7 @@ Syncu.build = (() => {
   async function executePlan(plan, clips, onStep, replan) {
     const pp = Syncu.pp;
     const log = (...a) => Syncu.log(...a);
-    const proj = await pp.project();
+    const proj = await pp.refreshItems(clips);
     const byId = new Map(clips.map((c) => [c.id, c]));
     const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
     const bin = await pp.ensureBin(proj, `Syncu ${stamp}`);

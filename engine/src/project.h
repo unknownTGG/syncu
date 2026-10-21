@@ -33,11 +33,14 @@ struct ManualEdge {
 struct AnalyzeOptions {
   MatchOptions match;
   float autoConfidence = 0.5f;    // edges at/above this are used automatically
-  float reviewConfidence = 0.15f; // between review and auto -> needs review
+  float reviewConfidence = 0.3f;  // between review and auto -> needs review
   double driftMinOverlap = 180.0; // seconds of overlap before measuring drift
   double driftStep = 60.0;        // seconds between drift measurements
   double driftTolerance = 0.002;  // seconds; max sync error before cutting
   double outlierTolerance = 0.02; // seconds; edges worse than this are dropped
+  double consistencyTolerance = 0.1; // seconds two match chains may disagree by
+  double overlapTolerance = 1.0;     // seconds same-device clips may overlap
+  double maxDrift = 500e-6;          // clock rate errors beyond this are rejected
   int threads = 0;                // 0 = hardware concurrency
   std::vector<ManualEdge> manualEdges;
 };

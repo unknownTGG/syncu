@@ -1,6 +1,9 @@
 #include "server.h"
 
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -35,7 +38,7 @@ namespace syncu {
 
 namespace {
 
-const char* kVersion = "0.1.4";
+const char* kVersion = "0.1.5";
 
 struct Job {
   std::atomic<double> progress{0.0};
@@ -44,6 +47,110 @@ struct Job {
   std::string result;  // JSON, set when done
   std::atomic<bool> done{false};
 };
+
+// ---- Self-update ----
+// The panel hands us a release asset URL; we download it, run its installer
+// in update mode (replaces this binary, installs the panel .ccx) and then
+// exit so the new helper takes over (launchd restarts us on macOS; on
+// Windows we start it ourselves).
+struct UpdateState {
+  std::mutex mu;
+  std::string state = "idle";  // idle | running | restarting | failed
+  std::string message;
+} g_update;
+
+const char* kReleasePrefix = "https://github.com/unknownTGG/syncu/releases/download/";
+
+bool safeUrl(const std::string& u) {
+  if (u.rfind(kReleasePrefix, 0) != 0 || u.size() > 300) return false;
+  for (char c : u)
+    if (!(std::isalnum((unsigned char)c) || std::strchr("._/:-", c))) return false;
+  return u.find("..") == std::string::npos;
+}
+
+void setUpdate(const std::string& st, const std::string& msg) {
+  std::lock_guard<std::mutex> l(g_update.mu);
+  g_update.state = st;
+  g_update.message = msg;
+  (st == "failed" ? logError : logInfo)("update: " + st + (msg.empty() ? "" : ": " + msg));
+}
+
+std::string readTail(const std::string& path, size_t n) {
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return "";
+  std::string s;
+  char b[4096];
+  size_t k;
+  while ((k = std::fread(b, 1, sizeof(b), f)) > 0) s.append(b, k);
+  std::fclose(f);
+  return s.size() > n ? s.substr(s.size() - n) : s;
+}
+
+void runUpdate(std::string url) {
+#if defined(_WIN32)
+  const char* tmp = std::getenv("TEMP");
+  const std::string dir = std::string(tmp ? tmp : "C:\\Windows\\Temp") + "\\syncu-update";
+  const std::string script = dir + "\\update.ps1", logf = dir + "\\update.log";
+  CreateDirectoryW(widen(dir).c_str(), nullptr);
+  if (std::FILE* f = _wfopen(widen(script).c_str(), L"wb")) {
+    std::fprintf(f,
+                 "$ErrorActionPreference = 'Stop'\r\n"
+                 "$d = Split-Path -Parent $MyInvocation.MyCommand.Path\r\n"
+                 "Remove-Item -Recurse -Force (Join-Path $d 'Syncu') -ErrorAction SilentlyContinue\r\n"
+                 "Invoke-WebRequest -UseBasicParsing -Uri '%s' -OutFile (Join-Path $d 's.zip')\r\n"
+                 "Expand-Archive -Force (Join-Path $d 's.zip') $d\r\n"
+                 "& (Join-Path $d 'Syncu\\install-windows.ps1') -Update\r\n",
+                 url.c_str());
+    std::fclose(f);
+  }
+  const std::string cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\" > \"" + logf + "\" 2>&1";
+  setUpdate("running", "downloading and installing");
+  const int rc = _wsystem(widen(cmd).c_str());
+#else
+  const std::string dir = "/tmp/syncu-update-" + std::to_string(::getpid());
+  const std::string script = dir + "/update.sh", logf = dir + "/update.log";
+  std::system(("mkdir -p " + dir).c_str());
+  if (std::FILE* f = std::fopen(script.c_str(), "wb")) {
+    std::fprintf(f,
+                 "set -e\n"
+                 "cd \"$(dirname \"$0\")\"\n"
+                 "rm -rf Syncu s.zip\n"
+                 "curl -fsSL -o s.zip '%s'\n"
+                 "ditto -x -k s.zip . 2>/dev/null || unzip -q s.zip\n"
+                 "bash Syncu/install-mac.command --update\n",
+                 url.c_str());
+    std::fclose(f);
+  }
+  setUpdate("running", "downloading and installing");
+  const int rc = std::system(("/bin/bash " + script + " > " + logf + " 2>&1").c_str());
+#endif
+  const std::string tail = readTail(logf, 1500);
+  if (!tail.empty()) logInfo("update log:\n" + tail);
+  if (rc != 0) {
+    setUpdate("failed", "installer exited with " + std::to_string(rc) + (tail.empty() ? "" : ": " + tail.substr(tail.size() > 300 ? tail.size() - 300 : 0)));
+    return;
+  }
+  setUpdate("restarting", "installed; restarting the helper");
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // let the panel see it
+#if defined(_WIN32)
+  // Start the new helper (it waits for our port), then step aside.
+  const char* la = std::getenv("LOCALAPPDATA");
+  std::wstring exe = widen(std::string(la ? la : "") + "\\Syncu\\syncu-engine.exe");
+  std::wstring line = L"\"" + exe + L"\" serve";
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  if (CreateProcessW(exe.c_str(), line.data(), nullptr, nullptr, FALSE,
+                     DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+  } else {
+    setUpdate("failed", "installed, but couldn't start the new helper; log out and back in");
+    return;
+  }
+#endif
+  std::exit(0);  // macOS: launchd (KeepAlive) starts the new binary
+}
 
 std::mutex g_jobsMu;
 std::map<int, std::shared_ptr<Job>> g_jobs;
@@ -187,6 +294,27 @@ void handle(sock_t s) {
         }
         respond(s, 200, out.dump());
       }
+    } else if (req.method == "POST" && req.path == "/update") {
+      const std::string url = json::parse(req.body).value("url", "");
+      if (!safeUrl(url)) {
+        respond(s, 400, R"({"ok":false,"error":"not a Syncu release URL"})");
+      } else {
+        bool busy;
+        {
+          std::lock_guard<std::mutex> l(g_update.mu);
+          busy = g_update.state == "running" || g_update.state == "restarting";
+        }
+        if (busy) {
+          respond(s, 400, R"({"ok":false,"error":"an update is already running"})");
+        } else {
+          setUpdate("running", "starting");
+          std::thread(runUpdate, url).detach();
+          respond(s, 200, R"({"ok":true})");
+        }
+      }
+    } else if (req.method == "GET" && req.path == "/update") {
+      std::lock_guard<std::mutex> l(g_update.mu);
+      respond(s, 200, json{{"ok", true}, {"state", g_update.state}, {"message", g_update.message}}.dump());
     } else if (req.method == "POST" && req.path == "/match") {
       respond(s, 200, matchJson(sanitize(req.body)));
     } else {
@@ -214,7 +342,13 @@ int runServer(int port) {
   addr.sin_family = AF_INET;
   addr.sin_port = htons(uint16_t(port));
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // never reachable from the network
-  if (bind(ls, (sockaddr*)&addr, sizeof(addr)) != 0) {
+  // After a self-update the old helper may still hold the port for a moment.
+  bool bound = false;
+  for (int attempt = 0; attempt < 40 && !bound; ++attempt) {
+    bound = bind(ls, (sockaddr*)&addr, sizeof(addr)) == 0;
+    if (!bound) std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  }
+  if (!bound) {
     std::fprintf(stderr, "Syncu helper: port %d busy (already running?)\n", port);
     return 1;
   }

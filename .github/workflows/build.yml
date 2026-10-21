@@ -98,3 +98,48 @@ jobs:
         with:
           name: Syncu-${{ matrix.name }}
           path: dist/Syncu
+
+  # Every push to main publishes a GitHub release for the version in
+  # plugin/manifest.json; the panel's Update button installs from it.
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Syncu-*
+          path: artifacts
+
+      - name: Package release
+        run: |
+          VER=$(python3 -c "import json;print(json.load(open('plugin/manifest.json'))['version'])")
+          echo "VER=$VER" >> $GITHUB_ENV
+          # The panel as an installable .ccx (a zip of the plugin folder).
+          (cd plugin && zip -qr ../syncu.ccx . -x 'tests/*')
+          mkdir -p release
+          for name in mac-arm64 win-x64; do
+            rm -rf stage && mkdir -p stage
+            cp -R "artifacts/Syncu-$name" stage/Syncu
+            cp syncu.ccx stage/Syncu/
+            chmod +x stage/Syncu/*.command stage/Syncu/helper/* 2>/dev/null || true
+            (cd stage && zip -qr "../release/Syncu-$name.zip" Syncu)
+          done
+          ls -l release
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$VER"
+          NOTES="Syncu $VER ($(git rev-parse --short HEAD)). First install: unzip, then run install-mac.command (Mac) or install-windows.ps1 (Windows). Already installed: use the Update button in the panel."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/*.zip --clobber
+            gh release edit "$TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" release/*.zip --title "Syncu $VER" --notes "$NOTES" --target "$GITHUB_SHA"
+          fi

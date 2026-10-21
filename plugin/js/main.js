@@ -6,12 +6,19 @@ window.Syncu = window.Syncu || {};
   const state = { clips: [], result: null, manualEdges: [] };
   const ctx = { state, selfTest: [], lastPlan: null };
 
-  // Mirror log lines into the Diagnostics box.
-  Syncu.log.onLine((line) => {
+  // Mirror the last log lines into the Diagnostics box, at most a few times
+  // a second and only while it's open (a huge, constantly rewritten text
+  // box makes the whole panel sluggish).
+  let logTimer = null;
+  function paintLog() {
+    logTimer = null;
+    if ($("secHelp").classList.contains("collapsed")) return;
     const el = $("log");
-    el.textContent += line + "\n";
-    if (el.textContent.length > 200000) el.textContent = el.textContent.slice(-150000);
+    el.textContent = Syncu.log.lines().slice(-250).join("\n");
     el.scrollTop = el.scrollHeight;
+  }
+  Syncu.log.onLine(() => {
+    if (!logTimer) logTimer = setTimeout(paintLog, 300);
   });
 
   function esc(s) {
@@ -146,8 +153,10 @@ window.Syncu = window.Syncu || {};
   }
 
   let lastHealth = null;
+  let healthInfo = null;
   async function checkEngine() {
     const h = await Syncu.engine.health();
+    healthInfo = h;
     const pill = $("engineStatus");
     const label = pill.querySelector(".label");
     if (h && h.ok && h.ffmpegVersion === "") {
@@ -240,6 +249,7 @@ window.Syncu = window.Syncu || {};
     const n = (m) => r.clips.filter((c) => c.method === m).length;
     Syncu.log(`result: ${r.components} scene(s), ${n("audio") + n("manual")} by audio, ${n("timestamp")} by timestamp, ${n("none")} unplaced, ${r.edges.filter((e) => e.status === "review").length} match(es) to review`);
     renderSummary();
+    reviewShown = REVIEW_PAGE;
     renderReview();
     expand("secResults");
     markStep("secResults", true);
@@ -279,56 +289,89 @@ window.Syncu = window.Syncu || {};
     for (const c of drift)
       html += `<div class="row"><div class="meta">${esc(clipName(c.id))}: ${c.driftPpm.toFixed(1)} ppm → ${c.segments.length} pieces</div></div>`;
     // Full-length clips are aligned at their middle; say how far the ends drift.
+    const drifting = [];
     for (const c of r.clips) {
       if (c.segments.length !== 1) continue;
       const s = c.segments[0];
       const endErrMs = Math.abs(c.driftPpm) * 1e-6 * (s.end - s.start) * 0.5 * 1000;
       if (endErrMs < 2) continue;
-      const msg = `${esc(clipName(c.id))}: clock drifts ${c.driftPpm.toFixed(1)} ppm — in sync at its middle, up to ${endErrMs.toFixed(0)} ms off at its ends. Turn on "Cut long recordings to fix clock drift" (Advanced) if that matters.`;
-      html += `<div class="row warn"><div class="meta">${msg}</div></div>`;
-      Syncu.log("warn", msg.replace(/<[^>]+>/g, ""));
+      drifting.push({ name: clipName(c.id), ms: endErrMs, ppm: c.driftPpm });
+      Syncu.log("warn", `${clipName(c.id)}: clock drifts ${c.driftPpm.toFixed(1)} ppm, up to ${endErrMs.toFixed(0)} ms off at its ends`);
+    }
+    if (drifting.length) {
+      drifting.sort((a, b) => b.ms - a.ms);
+      const worst = drifting.slice(0, 3).map((d) => `${esc(d.name)} (${d.ms.toFixed(0)} ms)`).join(", ");
+      html += `<div class="row warn"><div class="title">Clock drift on ${drifting.length} long clip(s)</div>
+        <div class="meta">In sync at their middle; the ends are a little off — worst: ${worst}. Turn on “Cut long recordings to fix clock drift” (Advanced) if that matters.</div></div>`;
     }
     $("summary").innerHTML = html;
   }
 
   // ---- 4. Review ----
-  function renderReview() {
+  // One row per clip that didn't sync by audio, with its best few possible
+  // matches. Rendering every candidate pair (thousands on a big shoot) made
+  // the panel crawl, so the list is short and pages on demand.
+  const REVIEW_PAGE = 20;
+  let reviewShown = REVIEW_PAGE;
+
+  function reviewRows() {
     const r = state.result;
+    const synced = new Set(r.clips.filter((c) => c.method === "audio" || c.method === "manual").map((c) => c.id));
+    const byClip = new Map();
+    r.edges.forEach((e, i) => {
+      if (e.status !== "review") return;
+      for (const [me, other] of [[e.b, e.a], [e.a, e.b]]) {
+        if (synced.has(me)) continue;
+        if (!byClip.has(me)) byClip.set(me, []);
+        byClip.get(me).push({ i, e, other });
+      }
+    });
     const rows = [];
-    for (const [i, e] of r.edges.entries()) {
-      if (e.status !== "review") continue;
-      // Radio buttons, not a <select>: selects don't read reliably in Premiere's UXP.
-      const opts = e.match.candidates
-        .map((c, k) => `<label><input type="radio" class="cand" name="cand-${i}" value="${c.offset}" ${k === 0 ? "checked" : ""} /> ${c.offset.toFixed(3)} s · score ${c.score.toFixed(1)}${k === 0 ? " (best)" : ""}</label>`)
-        .join("");
-      rows.push(`<div class="row warn" data-edge="${i}">
-        <div class="title">${esc(clipName(e.b))} ↔ ${esc(clipName(e.a))}</div>
-        <div class="meta">Confidence ${(e.match.confidence * 100).toFixed(0)}% — pick the right offset:</div>
-        ${opts}
-        <label>Nudge <input class="nudge num" type="text" value="0" /> ms</label>
-        <label class="check"><input type="checkbox" class="use" /> Use this match</label></div>`);
-    }
     for (const c of r.clips) {
       if (!c.needsReview) continue;
+      const cands = (byClip.get(c.id) || []).sort((x, y) => y.e.match.confidence - x.e.match.confidence).slice(0, 3);
+      rows.push({ c, cands });
+    }
+    // Clips with something to pick first.
+    rows.sort((a, b) => (b.cands.length > 0) - (a.cands.length > 0));
+    return rows;
+  }
+
+  function renderReview() {
+    const r = state.result;
+    const rows = reviewRows();
+    const html = [];
+    for (const { c, cands } of rows.slice(0, reviewShown)) {
       const why = c.method === "timestamp" ? "placed by file time only — check it (marked on the timeline)"
         : c.source === "missing" ? "file not found (drive offline?) and no proxy — goes in the “Not synced” area"
+        : cands.length ? "no confident match — pick one below, or leave it for the “Not synced” area"
         : "no audio match — goes in the “Not synced” area to place by hand";
-      rows.push(`<div class="row ${c.method === "none" ? "err" : "warn"}"><div class="title">${esc(clipName(c.id))}</div><div class="meta">${why}</div></div>`);
+      let body = "";
+      for (const { i, e, other } of cands) {
+        const best = e.match.candidates[0] || { offset: e.match.offset };
+        body += `<label class="pick"><input type="checkbox" class="use" data-edge="${i}" data-offset="${best.offset}" />
+          with ${esc(clipName(other))} · ${(e.match.confidence * 100).toFixed(0)}%</label>`;
+      }
+      html.push(`<div class="row ${c.method === "none" ? "err" : "warn"}"><div class="title">${esc(clipName(c.id))}</div><div class="meta">${why}</div>${body}</div>`);
     }
+    if (rows.length > reviewShown)
+      html.push(`<div class="row-actions"><button id="moreReview" class="btn quiet">Show ${Math.min(REVIEW_PAGE, rows.length - reviewShown)} more of ${rows.length - reviewShown}</button></div>`);
     $("reviewSection").classList.toggle("hidden", rows.length === 0);
-    $("reviewList").innerHTML = rows.join("");
+    $("reviewList").innerHTML = html.join("");
+    const more = $("moreReview");
+    if (more) more.addEventListener("click", () => {
+      reviewShown += REVIEW_PAGE;
+      renderReview();
+    });
     // Only offer re-analysis when there are matches to choose between.
-    $("reanalyzeBtn").parentElement.classList.toggle("hidden", !r.edges.some((e) => e.status === "review"));
+    $("reanalyzeBtn").parentElement.classList.toggle("hidden", !rows.some((x) => x.cands.length));
   }
 
   function collectManualEdges() {
     const edges = [...state.manualEdges];
-    $("reviewList").querySelectorAll("[data-edge]").forEach((row) => {
-      if (!row.querySelector(".use").checked) return;
-      const e = state.result.edges[Number(row.dataset.edge)];
-      const pick = row.querySelector("input.cand:checked") || row.querySelector("input.cand");
-      const nudge = parseFloat(String(row.querySelector(".nudge").value).replace(",", ".")) || 0;
-      const off = Number(pick.value) + nudge / 1000;
+    $("reviewList").querySelectorAll("input.use:checked").forEach((box) => {
+      const e = state.result.edges[Number(box.dataset.edge)];
+      const off = Number(box.dataset.offset);
       edges.push({ a: e.a, b: e.b, offset: off });
       Syncu.log(`manual fix: ${e.a} <- ${e.b} offset ${off.toFixed(6)}`);
     });
@@ -351,9 +394,85 @@ window.Syncu = window.Syncu || {};
     for (const w of plan.warnings) Syncu.log("warn", w);
     Syncu.log(`plan: ${plan.sequences.length} sequence(s), ${plan.sequences.reduce((n, s) => n + s.placements.length, 0)} placement(s), ${plan.unplaced.length} unplaced`);
     setProgress(0, "Building");
-    await Syncu.build.executePlan(plan, state.clips, (f, m) => setProgress(f, m), makePlan);
+    try {
+      await Syncu.build.executePlan(plan, state.clips, (f, m) => setProgress(f, m), makePlan);
+    } catch (e) {
+      if (!Syncu.pp.isStale(e)) throw e;
+      // Premiere dropped an object mid-build; start over with fresh ones.
+      Syncu.log("warn", "Premiere invalidated an object during the build; retrying once with fresh objects");
+      await Syncu.build.executePlan(makePlan(10594584000), state.clips, (f, m) => setProgress(f, m), makePlan);
+    }
     $("summary").insertAdjacentHTML("beforeend", `<div class="row ok"><div class="title">✓ Built ${ctx.lastPlan.sequences.length} sequence(s)</div><div class="meta">Look for the new “Syncu …” bin in the Project panel.</div></div>`);
     $("resultsSub").textContent = "Built";
+  }
+
+  // ---- Updates ----
+  // Releases live on GitHub; the helper downloads one, reinstalls itself and
+  // the panel (.ccx), then restarts. Premiere needs a restart for the panel.
+  const REPO = "unknownTGG/syncu";
+  const newer = (a, b) => {
+    const pa = String(a).split(".").map(Number), pb = String(b).split(".").map(Number);
+    for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+    return false;
+  };
+  let release = null;
+
+  function showUpdate(text, button) {
+    $("updateBar").classList.remove("hidden");
+    $("updateText").textContent = text;
+    $("updateBtn").classList.toggle("hidden", !button);
+    if (button) $("updateBtn").textContent = button;
+    fitScroll();
+  }
+
+  async function checkUpdate() {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { Accept: "application/vnd.github+json" } });
+      if (!res.ok) return;
+      const rel = await res.json();
+      const latest = String(rel.tag_name || "").replace(/^v/, "");
+      const helperVer = healthInfo && healthInfo.version;
+      if (!latest || !(newer(latest, Syncu.VERSION) || (helperVer && newer(latest, helperVer)))) return;
+      const os = healthInfo && healthInfo.os;
+      const asset = (rel.assets || []).find((a) => a.name === (os === "windows" ? "Syncu-win-x64.zip" : "Syncu-mac-arm64.zip"));
+      if (!asset) return;
+      release = { version: latest, url: asset.browser_download_url, page: rel.html_url };
+      Syncu.log(`update available: ${latest} (panel ${Syncu.VERSION}, helper ${helperVer || "?"})`);
+      showUpdate(`Syncu ${latest} is available`, "Update");
+    } catch (e) {
+      /* offline: no update check */
+    }
+  }
+
+  async function runUpdate() {
+    if (!release) return;
+    showUpdate(`Installing ${release.version}…`, null);
+    try {
+      await Syncu.engine.startUpdate(release.url);
+    } catch (e) {
+      // Helpers before 0.1.5 can't update themselves.
+      Syncu.log("warn", `self-update unavailable: ${Syncu.log.errText(e)}`);
+      showUpdate(`This helper can't update itself yet. Download ${release.version} from GitHub (Releases) and run the installer once — after that, updates are one click.`, null);
+      return;
+    }
+    for (let i = 0; i < 150; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const st = await Syncu.engine.updateStatus();
+      if (st && st.state === "failed") {
+        Syncu.log("error", `update failed: ${st.message}`);
+        showUpdate(`Update failed: ${st.message}`, "Try again");
+        return;
+      }
+      if (st && st.state === "running") showUpdate(`Installing ${release.version}… (${st.message})`, null);
+      const h = await Syncu.engine.health();
+      if (h && h.version === release.version) {
+        Syncu.log(`helper updated to ${h.version}`);
+        await checkEngine();
+        showUpdate(Syncu.VERSION === release.version ? `Updated to ${release.version}.` : `Updated to ${release.version} — restart Premiere Pro to load the new panel.`, null);
+        return;
+      }
+    }
+    showUpdate("The update is taking unusually long — Copy report (Help) and send it over.", "Try again");
   }
 
   // ---- Report ----
@@ -398,6 +517,7 @@ window.Syncu = window.Syncu || {};
     })
   );
   $("buildBtn").addEventListener("click", () => guard($("buildBtn"), "build", build));
+  $("updateBtn").addEventListener("click", () => guard($("updateBtn"), "update", runUpdate));
   $("selfTestBtn").addEventListener("click", () =>
     guard($("selfTestBtn"), "self-test", async () => {
       ctx.selfTest = await Syncu.pp.runSelfTest();
@@ -410,6 +530,7 @@ window.Syncu = window.Syncu || {};
     const id = head.dataset.toggle;
     head.addEventListener("click", () => {
       setCollapsed(id, !$(id).classList.contains("collapsed"));
+      if (id === "secHelp") paintLog();
       fitScroll();
     });
     const saved = loadPref(`collapsed.${id}`, null);
@@ -440,6 +561,6 @@ window.Syncu = window.Syncu || {};
     Syncu.log(`Syncu panel ${Syncu.VERSION}`);
   }
   updateButtons();
-  checkEngine();
+  checkEngine().then(checkUpdate);
   setInterval(checkEngine, 10000);
 })();

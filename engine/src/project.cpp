@@ -317,7 +317,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
     logInfo("matched " + std::to_string(pairs.size()) + " pairs in " + elapsed() + ": " +
             std::to_string(used) + " confident, " + std::to_string(review) + " for review");
     for (auto& e : edges)
-      if (e.status != "rejected")
+      if (e.status == "used")
         logInfo("  " + e.status + " " + e.a + " <- " + e.b +
                 fmt(" offset %.6f s conf %.2f ratio %.2f", e.match.offset, e.match.confidence, e.match.peakRatio) +
                 fmt(" corr %.2f overlap %.1f s", e.match.correlation, e.match.overlap));
@@ -347,6 +347,74 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
     edgeNodes.push_back({A, B});
   }
 
+  // ---- 3b. Keep only matches that agree with each other and with physics. ----
+  // A camera or recorder can't record two clips at once, and a clip has one
+  // place on the timeline. Unrelated takes that share background noise give
+  // plenty of plausible-looking matches, so accept matches strongest-first
+  // and reject any that contradict what's already been accepted.
+  {
+    std::vector<size_t> order;
+    for (size_t i = 0; i < edges.size(); ++i)
+      if (edges[i].status == "used" || edges[i].status == "manual") order.push_back(i);
+    std::stable_sort(order.begin(), order.end(), [&](size_t p, size_t q) {
+      const bool mp = edges[p].status == "manual", mq = edges[q].status == "manual";
+      if (mp != mq) return mp;
+      return edges[p].match.confidence > edges[q].match.confidence;
+    });
+    const size_t NN = nodes.size();
+    std::vector<int> root(NN);
+    std::vector<double> rel(NN, 0.0);  // node start, relative to its group
+    std::vector<std::vector<int>> members(NN);
+    for (size_t n = 0; n < NN; ++n) root[n] = int(n), members[n] = {int(n)};
+    // Same-device overlap if group cb were shifted by `shift` into group ca.
+    auto clash = [&](int ca, int cb, double shift) -> std::pair<int, int> {
+      for (int a : members[ca])
+        for (int b : members[cb]) {
+          if (nodes[a].device != nodes[b].device) continue;
+          const double s1 = rel[a], s2 = rel[b] + shift;
+          const double ov = std::min(s1 + nodes[a].duration, s2 + nodes[b].duration) - std::max(s1, s2);
+          if (ov <= opts.overlapTolerance) continue;
+          // The same file imported twice (e.g. "Take 1 (1).WAV") lands on itself.
+          if (std::fabs(nodes[a].duration - nodes[b].duration) < 0.05 && std::fabs(s1 - s2) < 0.5) continue;
+          return {a, b};
+        }
+      return {-1, -1};
+    };
+    auto nodeName = [&](int n) { return clips[nodes[n].clips[0]].id; };
+    int rejected = 0;
+    for (size_t i : order) {
+      auto& e = edges[i];
+      const auto [A, B] = edgeNodes[i];
+      const double o = e.match.offset;  // start(B) = start(A) + o
+      const int ca = root[A], cb = root[B];
+      if (ca == cb) {
+        const double err = (rel[B] - rel[A]) - o;
+        if (std::fabs(err) > opts.consistencyTolerance && e.status != "manual") {
+          e.status = "outlier";
+          ++rejected;
+          logInfo("rejecting " + e.a + " <- " + e.b + fmt(" (conf %.2f): disagrees with stronger matches by %.3f s", e.match.confidence, err));
+        }
+        continue;
+      }
+      const double shift = rel[A] + o - rel[B];
+      const auto [x, y] = clash(ca, cb, shift);
+      if (x >= 0 && e.status != "manual") {
+        e.status = "outlier";
+        ++rejected;
+        logInfo("rejecting " + e.a + " <- " + e.b + fmt(" (conf %.2f)", e.match.confidence) + ": would make " +
+                nodeName(x) + " and " + nodeName(y) + " (both " + nodes[x].device + ") record at the same time");
+        continue;
+      }
+      for (int b : members[cb]) {
+        rel[b] += shift;
+        root[b] = ca;
+        members[ca].push_back(b);
+      }
+      members[cb].clear();
+    }
+    if (rejected) logInfo(std::to_string(rejected) + " match(es) rejected as inconsistent");
+  }
+
   // ---- 4. Observations per edge (drift-measured for long overlaps). ----
   std::vector<std::vector<Obs>> obs(edges.size());
   std::vector<size_t> driftJobs;
@@ -363,6 +431,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
         nodes[B].lead != SIZE_MAX)
       driftJobs.push_back(i);
   }
+  std::vector<char> driftValid(edges.size(), 0);
   std::atomic<size_t> drifted{0};
   parallelFor(driftJobs.size(), opts.threads, [&](size_t j) {
     size_t i = driftJobs[j];
@@ -385,6 +454,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
         for (const auto& p : r.points)
           if (p.inlier) pts.push_back({p.timeB, p.offset, w});
         obs[i] = pts;
+        driftValid[i] = 1;
       }
     } catch (const std::exception& ex) {
       logError("drift " + edges[i].a + " <- " + edges[i].b + " failed: " + ex.what());
@@ -398,6 +468,11 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
   // (A, B) at B-time tB with offset o = tA - tB gives the linear equation
   //   x_B - x_A + eps_B * tB - eps_A * (tB + o) = o.
   const size_t N = nodes.size();
+  // Clock-rate error is only free where drift was actually measured on a
+  // long overlap; elsewhere a single offset can't tell rate from position.
+  // Many short matches spread over a long clip also pin its rate, so a node
+  // is "measured" when its observations span at least driftMinOverlap.
+  std::vector<char> measured(N, 0);
   std::vector<double> x(N, 0.0), eps(N, 0.0);
   std::vector<int> comp(N, -1);
   for (int iter = 0; iter < 1000; ++iter) {
@@ -408,6 +483,22 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
 
     std::map<int, std::vector<int>> members;
     for (size_t n = 0; n < N; ++n) members[uf.find(int(n))].push_back(int(n));
+
+    std::fill(measured.begin(), measured.end(), 0);
+    {
+      std::vector<double> lo(N, 1e300), hi(N, -1e300);
+      for (size_t i = 0; i < edges.size(); ++i) {
+        if (edges[i].status != "used" && edges[i].status != "manual") continue;
+        const auto [A, B] = edgeNodes[i];
+        if (driftValid[i]) measured[A] = measured[B] = 1;
+        for (const auto& o : obs[i]) {
+          lo[B] = std::min(lo[B], o.tB), hi[B] = std::max(hi[B], o.tB);
+          lo[A] = std::min(lo[A], o.tB + o.offset), hi[A] = std::max(hi[A], o.tB + o.offset);
+        }
+      }
+      for (size_t n = 0; n < N; ++n)
+        if (hi[n] - lo[n] >= opts.driftMinOverlap) measured[n] = 1;
+    }
 
     std::fill(comp.begin(), comp.end(), -1);
     int nextComp = 0;
@@ -450,12 +541,15 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
       }
       // Weak prior pulling every clock-rate error to zero; it only matters
       // for nodes whose drift isn't measured (short overlaps).
-      for (auto& [n, ci] : col) addRow({{ci + 1, 1.0}}, 0.0, 1.0);
+      for (auto& [n, ci] : col) addRow({{ci + 1, 1.0}}, 0.0, measured[n] ? 1.0 : 1e8);
 
       if (!solveDense(AtA, Atb, M)) continue;
       x[ref] = 0.0;
       eps[ref] = 0.0;
       for (auto& [n, ci] : col) x[n] = Atb[ci], eps[n] = Atb[ci + 1];
+      // Real clocks are within a few hundred ppm; more is a bad fit.
+      for (auto& [n, ci] : col)
+        if (std::fabs(eps[n]) > opts.maxDrift) eps[n] = 0.0;
     }
     out.components = nextComp;
 
@@ -579,6 +673,19 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
                              r.position > sp->second.second + 3600.0)) {
       logWarn("clock looks wrong for " + clips[i].path + fmt(": would land %.0f s outside its scene; not placed",
               r.position < sp->second.first ? sp->second.first - r.position - dur : r.position - sp->second.second));
+      r.position = 0.0;
+      r.component = -1;
+      continue;
+    }
+    bool collides = false;
+    for (size_t j = 0; j < clips.size() && !collides; ++j) {
+      const auto& q = out.clips[j];
+      if (j == i || q.component != r.component || q.method == "none" || clips[j].device != clips[i].device) continue;
+      const double ov = std::min(r.position + dur, q.position + mediaDuration(j)) - std::max(r.position, q.position);
+      collides = ov > opts.overlapTolerance;
+    }
+    if (collides) {
+      logInfo("file time of " + clips[i].path + " overlaps another clip from " + clips[i].device + "; not placed");
       r.position = 0.0;
       r.component = -1;
       continue;

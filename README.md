@@ -44,7 +44,7 @@ Syncu lines up footage from any number of cameras and audio recorders by listeni
 | OS | macOS 12+ on Apple Silicon (M1 or newer) | Windows 10/11, 64-bit |
 | Premiere Pro | **26.2 or newer** | **26.2 or newer** |
 | FFmpeg | Install with Homebrew (below) | Included in the download |
-| Adobe **UXP Developer Tool** | Free, from the Creative Cloud app | Same |
+| Creative Cloud desktop app | Installs the panel (`.ccx`) | Same |
 
 Intel Macs aren't built yet. Ask if you need one.
 
@@ -60,38 +60,33 @@ brew install ffmpeg
 
 No Homebrew? Install it from [brew.sh](https://brew.sh) first.
 
-**2. Download Syncu.** On this repo, go to the **Actions** tab, open the latest green ✔ **build** run, and scroll to **Artifacts**. Download **Syncu-mac-arm64** and unzip it. You need to be signed in to GitHub to see artifacts.
+**2. Download Syncu.** Open the [latest release](https://github.com/unknownTGG/syncu/releases/latest), download **Syncu-mac-arm64.zip** and unzip it.
 
-**3. Install the helper.** The helper is the small background program that does the audio analysis.
+**3. Run the installer.** It installs the helper (the small background program that does the audio analysis) and the Premiere panel.
 
 - In Terminal, type `bash ` (with a trailing space).
 - Drag `install-mac.command` from the unzipped folder into the Terminal window.
 - Press **Enter**.
 
-You should see `Syncu helper is running`. It now starts by itself every time you log in.
+You should see `Syncu helper is running`. The helper now starts by itself every time you log in. The panel is installed through Adobe's plugin installer; if that isn't available, the `.ccx` opens in Creative Cloud. Click **Install** there.
 
 > Use `bash` rather than double-clicking. GitHub's zip downloads strip the "executable" permission, and macOS blocks downloaded scripts.
 
-**4. Load the panel into Premiere.**
-
-1. Install **UXP Developer Tool** from the Creative Cloud app (*Apps → search "UXP"*).
-2. Open Premiere Pro. If the Developer Tool doesn't see Premiere, turn on developer mode in Premiere's settings (look under *Plugins*).
-3. In the UXP Developer Tool, click **Add Plugin**, choose `plugin/manifest.json` from the unzipped folder, then click **Load**.
-4. In Premiere, open **Window → UXP Plugins → Syncu**.
+**4. Open the panel.** Restart Premiere Pro, then open **Window → UXP Plugins → Syncu** (or **Window → Extensions**, depending on version).
 
 The status light at the top right of the panel should be green and say **Ready**. If it isn't, see [Troubleshooting](#troubleshooting).
 
-> A plugin loaded through the Developer Tool may need loading again after Premiere restarts. Open the UXP Developer Tool and click **Load** again.
+> **Coming from an older version?** If you loaded Syncu through the UXP Developer Tool before, remove it there (*⋯ → Remove*) so only the installed copy is left.
 
 ---
 
 ## Install on Windows
 
-1. **Download** **Syncu-win-x64** from the **Actions** tab (latest green run → **Artifacts**) and unzip it. FFmpeg is included.
-2. **Install the helper.** Right-click `install-windows.ps1` → **Run with PowerShell**.
-   - It copies the helper to `%LOCALAPPDATA%\Syncu` and starts it hidden at every login.
+1. **Download** **Syncu-win-x64.zip** from the [latest release](https://github.com/unknownTGG/syncu/releases/latest) and unzip it. FFmpeg is included.
+2. **Run the installer.** Right-click `install-windows.ps1` → **Run with PowerShell**.
+   - It installs the panel and copies the helper to `%LOCALAPPDATA%\Syncu` and starts it hidden at every login.
    - If Windows blocks the script, open PowerShell in that folder and run `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1`.
-3. **Load the panel** with the UXP Developer Tool, the same as Mac step 4: *Add Plugin* → `plugin\manifest.json` → *Load*.
+3. **Restart Premiere** and open **Window → UXP Plugins → Syncu**. Remove any old copy from the UXP Developer Tool.
 
 ---
 
@@ -249,14 +244,13 @@ Logs are also kept on disk:
 
 ## Updating and uninstalling
 
-**Update:**
-1. Download the newest artifact.
-2. Re-run the installer. It replaces the helper and restarts it.
-3. In the UXP Developer Tool, remove the old plugin entry, then *Add Plugin* the new `plugin/manifest.json` and click *Load*.
+**Update:** when a new version is out, a bar appears at the top of the panel. Click **Update**. Syncu downloads the release from this repo, replaces the helper and the panel, and restarts the helper. Then restart Premiere. No Terminal needed.
 
-**Uninstall on Mac:** run `bash uninstall-mac.command`, then remove the plugin in the UXP Developer Tool.
+If the update fails, the bar shows why. You can always download the latest release and run the installer again.
 
-**Uninstall on Windows:** delete `%LOCALAPPDATA%\Syncu` and `SyncuHelper.vbs` from your Startup folder (Win+R → `shell:startup`). End `syncu-engine.exe` in Task Manager, and remove the plugin in the Developer Tool.
+**Uninstall on Mac:** run `bash uninstall-mac.command`, then remove Syncu in the Creative Cloud app (*Plugins → Manage plugins*).
+
+**Uninstall on Windows:** delete `%LOCALAPPDATA%\Syncu` and `SyncuHelper.vbs` from your Startup folder (Win+R → `shell:startup`). End `syncu-engine.exe` in Task Manager, and remove Syncu in the Creative Cloud app (*Plugins → Manage plugins*).
 
 ---
 
@@ -267,6 +261,7 @@ Logs are also kept on disk:
 - **It rejects requests without a private header**, which stops random websites from talking to it.
 - **Requests can't choose which program it runs.** It only ever runs FFmpeg, found on your own system.
 - **It only reads media files**; it never writes to or deletes them.
+- **Updates only come from this repo's GitHub releases.** The helper refuses any other download address, and only updates when you click **Update**.
 
 ---
 
@@ -277,7 +272,7 @@ Logs are also kept on disk:
 - **Video is never cut for drift.** If two long cameras drift against each other, the non-reference camera is aligned at its middle, and a note is logged.
 - **Camera audio with many separate mono channels** may use more audio tracks than planned. Tell us if tracks look shuffled.
 - **Mac builds are Apple Silicon only** for now.
-- **Developer-mode install:** Syncu loads through the UXP Developer Tool rather than the Creative Cloud marketplace. A signed `.ccx` package is possible later.
+- **Not on the Adobe marketplace:** the `.ccx` is installed directly from the GitHub release.
 
 ---
 

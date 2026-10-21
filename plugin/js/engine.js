@@ -30,6 +30,19 @@ Syncu.engine = (() => {
       }
     },
 
+    // Self-update: the helper downloads a release and reinstalls itself.
+    async startUpdate(url) {
+      const r = await call("POST", "/update", { url });
+      if (!r.ok) throw new Error(r.error || "helper refused the update");
+    },
+    async updateStatus() {
+      try {
+        return await call("GET", "/update");
+      } catch (e) {
+        return null; // restarting
+      }
+    },
+
     // Runs a full analysis; onProgress(fraction, message) while it works.
     async analyze(request, onProgress) {
       const start = await call("POST", "/analyze", request);

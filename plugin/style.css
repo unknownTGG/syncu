@@ -81,6 +81,20 @@ html, body {
 .status.bad .dot { background: var(--bad); }
 .status.bad { color: var(--text); }
 
+/* ---- Update banner ---- */
+.update {
+  display: flex;
+  align-items: center;
+  margin: 0 10px 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: rgba(55, 142, 240, 0.10);
+}
+.update-text { flex: 1 1 auto; font-size: 11px; margin-right: 8px; }
+.btn.small { padding: 3px 10px; font-size: 10px; }
+.row label.pick { color: var(--text); font-size: 11px; }
+
 /* ---- Sections (Premiere-style collapsible headers) ---- */
 .section { border-top: 1px solid var(--border); }
 .section-head {

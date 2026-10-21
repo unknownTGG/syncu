@@ -123,10 +123,10 @@ async function main() {
   await click("analyzeBtn", () => !busy("analyzeBtn"));
   const summary = $("summary").textContent.replace(/\s+/g, " ");
   check("analyze: summary", /synced by audio/i.test(summary), summary.slice(0, 160));
-  check("settings: bad confidence reset to default", $("autoConf").value === "0.5" && /setting autoConf: "-13"/.test($("log").textContent), $("autoConf").value);
+  check("settings: bad confidence reset to default", $("autoConf").value === "0.5" && /setting autoConf: "-13"/.test(w.Syncu.log.lines().join("\n")), $("autoConf").value);
   check("analyze: proxy used for offline original", /analysed from their proxies/.test(summary), (summary.match(/\d+ clip\(s\) analysed[^.]*/) || [""])[0]);
   check("analyze: missing file explained", /1 file\(s\) can't be read/.test(summary) && /\/Volumes\/T7/.test(summary), (summary.match(/\d+ file\(s\) can't be read[^.]*\./) || [""])[0]);
-  check("analyze: drift reported for full-length recorder", /clock drifts -40\.\d ppm/.test(summary), (summary.match(/[^.]*clock drifts[^.]*/) || [""])[0]);
+  check("analyze: drift reported for full-length recorder", /Clock drift on \d+ long clip/.test(summary) && /clock drifts -40\.\d ppm/.test(w.Syncu.log.lines().join("\n")), (summary.match(/[^.]*clock drifts[^.]*/) || [""])[0]);
   check("analyze: review list shows unmatched + timestamp clips", !$("reviewSection").classList.contains("hidden"),
     $("reviewList").textContent.replace(/\s+/g, " ").slice(0, 200));
 
@@ -153,14 +153,14 @@ async function main() {
     for (const seq of made) verifySequence("driftcuts", seq, true);
   }
   $("driftCuts").checked = false;
-  const accLines = $("log").textContent.split("\n").filter((l) => /audio placed sample-accurately|audio placement accuracy|sub-frame/.test(l));
+  const accLines = w.Syncu.log.lines().join("\n").split("\n").filter((l) => /audio placed sample-accurately|audio placement accuracy|sub-frame/.test(l));
   check(`audio accuracy logged (${SUBFRAME})`, accLines.length > 0, accLines.slice(-2).map((l) => l.slice(13, 140)).join(" | "));
 
   // ---- Self-test ----
   const clipsInMock = [...mock.bins.values()].flatMap((b) => b.children);
   mock.setSelection([clipsInMock.find((c) => c.name === "camlong.mp4"), clipsInMock.find((c) => c.name === "recdrift.wav")]);
   await click("selfTestBtn", () => !busy("selfTestBtn"));
-  const logText = $("log").textContent;
+  const logText = w.Syncu.log.lines().join("\n");
   const selfLines = logText.split("\n").filter((l) => l.includes("self-test:"));
   check("self-test ran", selfLines.some((l) => l.includes("done")), `${selfLines.length} lines`);
   // With no sub-frame support at all, "exact audio placement" is expected to FAIL.
@@ -178,7 +178,7 @@ async function main() {
   await sleep(2500);
   check("log persisted to data folder", (memFiles["syncu-log.txt"] || "").includes("build"));
 
-  const errLines = $("log").textContent.split("\n").filter((l) => l.includes("[error]"));
+  const errLines = w.Syncu.log.lines().join("\n").split("\n").filter((l) => l.includes("[error]"));
   check("no errors logged", errLines.length === 0, errLines.slice(0, 5).join(" | "));
   check("no console errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 

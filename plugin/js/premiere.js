@@ -181,7 +181,59 @@ Syncu.pp = (() => {
 
   // ---- Building ----
 
+  // Premiere invalidates DOM objects over time ("The script object is no
+  // longer valid"), so objects saved at scan time can't be trusted at build
+  // time. Walk the project again and re-attach each clip by its media path.
+  async function refreshItems(clips) {
+    const proj = await project();
+    const byPath = new Map();
+    async function walk(item, depth) {
+      const folder = ppro.FolderItem.cast(item);
+      if (folder && depth < 30) {
+        let kids = null;
+        try {
+          kids = await folder.getItems();
+        } catch (e) {
+          kids = null;
+        }
+        if (kids) {
+          for (const k of kids) await walk(k, depth + 1);
+          return;
+        }
+      }
+      const clip = ppro.ClipProjectItem.cast(item);
+      if (!clip) return;
+      try {
+        const path = await clip.getMediaFilePath();
+        if (path && !byPath.has(path)) byPath.set(path, item);
+      } catch (e) {
+        /* not media */
+      }
+    }
+    await walk(await proj.getRootItem(), 0);
+    let found = 0;
+    for (const c of clips) {
+      const item = byPath.get(c.path);
+      if (item) (c.projectItem = item), found++;
+    }
+    if (found < clips.length) log("warn", `${clips.length - found} clip(s) no longer found in the project (deleted or relinked since Scan?)`);
+    return proj;
+  }
+
+  function isStale(e) {
+    return /no longer valid/i.test((e && e.message) || String(e));
+  }
+
   async function ensureBin(proj, name) {
+    try {
+      return await makeBin(proj, name);
+    } catch (e) {
+      log("warn", `couldn't create bin "${name}" (${Syncu.log.errText(e).split("\n")[0]}); sequences go to the project root`);
+      return null;
+    }
+  }
+
+  async function makeBin(proj, name) {
     const root = await proj.getRootItem();
     const before = new Set((await root.getItems()).map(itemName));
     transact(proj, "Syncu: create bin", () => [root.createBinAction(name, true)]);
@@ -543,7 +595,7 @@ Syncu.pp = (() => {
   }
 
   return {
-    ppro, ticks, seconds, project, transact, itemName,
+    ppro, ticks, seconds, project, transact, itemName, refreshItems, isStale,
     selectedClips, timelineClips, ensureBin, createSequence, allTrackItems, ensureTracks,
     removeItems, overwriteAction, trackItemsOn, placeAudioPiece, placeAudioExact, muteAudioTrack, addMarkers,
     subFrame, zeroOf,
