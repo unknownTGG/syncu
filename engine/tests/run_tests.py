@@ -97,15 +97,28 @@ def write_cam(path, x, codec="aac"):
 
 def write_cam_offset_audio(path, x, audio_delay):
     """Camera file whose audio stream starts `audio_delay` s after the video
-    (some cameras do this); PCM in MOV so there's no codec priming."""
+    (some cameras do this); PCM in MOV so there's no codec priming. The audio
+    goes through a WAV file: newer FFmpeg ignores -itsoffset on piped raw
+    input, which silently produced a file with no offset."""
     dur = len(x) / SR + audio_delay
-    pcm = (np.clip(x, -1, 1) * 32767).astype("<i2").tobytes()
+    wav = path + ".src.wav"
+    write_wav(wav, x)
     subprocess.run(["ffmpeg", "-v", "error", "-y",
                     "-f", "lavfi", "-i", f"color=c=gray:s=160x90:r=25:d={dur}",
-                    "-itsoffset", str(audio_delay),
-                    "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "-",
+                    "-itsoffset", str(audio_delay), "-i", wav,
+                    "-map", "0:v", "-map", "1:a",
                     "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "pcm_s16le", path],
-                   input=pcm, check=True)
+                   check=True)
+    os.remove(wav)
+    # Guard against this silently breaking again: decoded on the file's own
+    # timeline, the first `audio_delay` seconds must be padding (exact zeros).
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-af", "aresample=first_pts=0",
+                          "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"],
+                         capture_output=True, check=True).stdout
+    y = np.frombuffer(raw, dtype="<f4")
+    lead = int(np.argmax(np.abs(y) > 0))
+    if abs(lead - audio_delay * SR) > SR * 0.002:
+        raise RuntimeError(f"test media: audio offset in {path} is {lead / SR:.4f} s, wanted {audio_delay}")
 
 
 def engine(*args):
