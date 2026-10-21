@@ -29,7 +29,11 @@ CCX="$HERE/syncu.ccx"
 UPIA="/Library/Application Support/Adobe/Adobe Desktop Common/RemoteComponents/UPI/UnifiedPluginInstallerAgent/UnifiedPluginInstallerAgent.app/Contents/MacOS/UnifiedPluginInstallerAgent"
 if [ -f "$CCX" ]; then
   xattr -d com.apple.quarantine "$CCX" 2>/dev/null || true
-  if [ -x "$UPIA" ] && "$UPIA" --install "$CCX"; then
+  # The agent exits 0 even when it fails, so read what it prints.
+  OUT=""
+  [ -x "$UPIA" ] && OUT=$("$UPIA" --install "$CCX" 2>&1 || true)
+  echo "$OUT"
+  if [ -n "$OUT" ] && ! echo "$OUT" | grep -qi "fail\|error"; then
     echo "Panel installed. Restart Premiere Pro, then open Window > UXP Plugins > Syncu."
   else
     echo "Adobe's command-line installer didn't take it; opening the .ccx with Creative Cloud instead."

@@ -120,7 +120,19 @@ jobs:
           VER=$(python3 -c "import json;print(json.load(open('plugin/manifest.json'))['version'])")
           echo "VER=$VER" >> $GITHUB_ENV
           # The panel as an installable .ccx (a zip of the plugin folder).
-          (cd plugin && zip -qr ../syncu.ccx . -x 'tests/*')
+          # Packaged manifests name a single host object (the dev manifest may
+          # use an array); Adobe's installer rejects the array form.
+          rm -rf ccx && mkdir ccx && cp -R plugin/. ccx/ && rm -rf ccx/tests
+          python3 - <<'PY'
+          import json
+          p = "ccx/manifest.json"
+          m = json.load(open(p))
+          if isinstance(m.get("host"), list):
+              m["host"] = m["host"][0]
+          json.dump(m, open(p, "w"), indent=2)
+          PY
+          (cd ccx && zip -qrX ../syncu.ccx . -x '.*' -x '*/.*')
+          unzip -l syncu.ccx
           mkdir -p release
           for name in mac-arm64 win-x64; do
             rm -rf stage && mkdir -p stage

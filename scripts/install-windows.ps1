@@ -30,8 +30,10 @@ if (Test-Path $ccx) {
   Unblock-File $ccx
   $ok = $false
   if (Test-Path $upia) {
-    & $upia /install $ccx
-    $ok = ($LASTEXITCODE -eq 0)
+    # The agent can exit 0 even when it fails, so read what it prints.
+    $out = (& $upia /install $ccx 2>&1 | Out-String)
+    Write-Host $out
+    $ok = ($LASTEXITCODE -eq 0) -and ($out -notmatch "(?i)fail|error")
   }
   if ($ok) { Write-Host "Panel installed. Restart Premiere Pro, then open Window > UXP Plugins > Syncu." }
   else {
