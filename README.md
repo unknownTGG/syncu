@@ -79,7 +79,7 @@ You should see `Syncu helper is running`. It now starts by itself every time you
 3. In the UXP Developer Tool, click **Add Plugin**, choose `plugin/manifest.json` from the unzipped folder, then click **Load**.
 4. In Premiere, open **Window → UXP Plugins → Syncu**.
 
-The pill at the top right of the panel should be **green**. If it isn't, see [Troubleshooting](#troubleshooting).
+The status light at the top right of the panel should be green and say **Ready**. If it isn't, see [Troubleshooting](#troubleshooting).
 
 > A plugin loaded through the Developer Tool may need loading again after Premiere restarts. Open the UXP Developer Tool and click **Load** again.
 
@@ -100,14 +100,16 @@ The pill at the top right of the panel should be **green**. If it isn't, see [Tr
 Do this once. It takes about two minutes and tells us whether every Premiere feature Syncu relies on works on your version.
 
 1. In the Project panel, select **one video clip** and **one audio-only clip** (for example a WAV from your recorder).
-2. In the Syncu panel, open **Diagnostics → Run Premiere API self-test**. It creates a throwaway sequence called *Syncu self-test*, which you can delete afterwards.
-3. Click **Copy report for Claude** and paste it into the chat.
+2. In the Syncu panel, open **Help & diagnostics** at the bottom and click **Run Premiere self-test**. It creates a throwaway sequence called *Syncu self-test*, which you can delete afterwards. Its clips are trimmed on purpose; real builds keep audio full length.
+3. Click **Copy report** and paste it into the chat.
 
 Any `FAIL` line in the self-test points to exactly what needs fixing.
 
 ---
 
 ## How to use
+
+The panel is laid out top to bottom: **1 Source → 2 Output → 3 Results**. Each section folds away; a folded section's header still shows a one-line summary, such as *5 devices · 11 clips*. **Analyze** and **Build in Premiere** stay pinned at the bottom of the panel, and the rest scrolls.
 
 ### 1. Organize your media (recommended)
 
@@ -121,7 +123,7 @@ Put each device in its own bin: `Cam A`, `Cam B`, `Zoom`, `Lav 1`, and so on. Cl
 | **Selected bin(s), auto-detect devices** | Media isn't sorted. Syncu guesses devices from card folder names, e.g. `Cam A/Card 2/PRIVATE/M4ROOT/CLIP/C0001.MP4` → `Cam A`. |
 | **Active timeline, one track per device** | You've already laid out clips Syncaila-style: one camera or recorder per track. |
 
-Click **Scan**. The device list shows what was found. **Rename a device** in the list to fix grouping: give two devices the same name to merge them, or different names to split them.
+Click **Scan selection**. The device list shows what was found: **CAM** for cameras, **REC** for recorders. **Rename a device** in the list to fix grouping: give two devices the same name to merge them, or different names to split them.
 
 Multi-file recorders are detected automatically, for example Zoom `ZOOM0001_Tr1.WAV` / `_Tr2` / `_LR`, F-series `230101_0001_Tr1.wav`, and Tascam. Each file of a take gets its own track, and they stay locked together.
 
@@ -205,8 +207,8 @@ Under **Output → Advanced**:
 
 | Symptom | Fix |
 |---|---|
-| Pill says **helper not running** | Re-run the installer (`bash install-mac.command` / `install-windows.ps1`). To check by hand, run the helper in a terminal: Mac `~/Library/Application\ Support/Syncu/syncu-engine serve`, Windows `%LOCALAPPDATA%\Syncu\syncu-engine.exe serve`. If it says *port 47800 busy*, it's already running. |
-| Pill says **ffmpeg missing** | Mac: `brew install ffmpeg`, then re-run the installer. Windows: make sure `ffmpeg.exe` sits next to `syncu-engine.exe` in `%LOCALAPPDATA%\Syncu`. |
+| Status says **helper not running** | Re-run the installer (`bash install-mac.command` / `install-windows.ps1`). To check by hand, run the helper in a terminal: Mac `~/Library/Application\ Support/Syncu/syncu-engine serve`, Windows `%LOCALAPPDATA%\Syncu\syncu-engine.exe serve`. If it says *port 47800 busy*, it's already running. |
+| Status says **ffmpeg missing** | Mac: `brew install ffmpeg`, then re-run the installer. Windows: make sure `ffmpeg.exe` sits next to `syncu-engine.exe` in `%LOCALAPPDATA%\Syncu`. |
 | Helper runs but the panel can't reach it | Copy the report. The `helper` section says why (e.g. Premiere blocked the request). |
 | **Scan finds 0 clips** | Select bins or clips in the **Project panel** (not the timeline) before clicking Scan, or choose *Active timeline* as the source. |
 | "only one device found" | Every clip landed in one device, so nothing can be matched. Put each camera/recorder in its own bin, or rename devices in the list. |
@@ -218,10 +220,10 @@ Under **Output → Advanced**:
 
 ## Reporting a problem
 
-At the bottom of the panel:
+Under **Help & diagnostics** (bottom of the panel):
 
-- **Copy report for Claude** copies a full diagnostic report; paste it into the chat.
-- **Save report…** saves the same text to a file.
+- **Copy report** copies a full diagnostic report; paste it into the chat.
+- **Save…** saves the same text to a file.
 
 The report contains:
 - Premiere, OS, helper and FFmpeg versions

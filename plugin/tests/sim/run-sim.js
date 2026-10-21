@@ -109,14 +109,14 @@ async function main() {
 
   // ---- Scan ----
   await click("scanBtn", () => !busy("scanBtn"));
-  const devRows = $("deviceList").querySelectorAll(".row").length;
+  const devRows = $("deviceList").querySelectorAll(".device").length;
   check("scan: 5 devices", devRows === 5, `${devRows} rows`);
 
   // ---- Analyze (with a garbage setting, like the -13 seen in real Premiere) ----
   $("autoConf").value = "-13";
   await click("analyzeBtn", () => !busy("analyzeBtn"));
   const summary = $("summary").textContent.replace(/\s+/g, " ");
-  check("analyze: summary", /synced by audio/.test(summary), summary.slice(0, 160));
+  check("analyze: summary", /synced by audio/i.test(summary), summary.slice(0, 160));
   check("settings: bad confidence reset to default", $("autoConf").value === "0.5" && /setting autoConf: "-13"/.test($("log").textContent), $("autoConf").value);
   check("analyze: drift reported for full-length recorder", /clock drifts -40\.\d ppm/.test(summary), (summary.match(/[^.]*clock drifts[^.]*/) || [""])[0]);
   check("analyze: review list shows unmatched + timestamp clips", !$("reviewSection").classList.contains("hidden"),

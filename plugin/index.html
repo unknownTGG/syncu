@@ -5,68 +5,139 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
-    <h1>Syncu</h1>
-    <span id="engineStatus" class="pill">engine: checking…</span>
-  </header>
+  <div id="app">
+    <!-- Scrolling content. Analyze/Build live in the footer so they're always visible. -->
+    <div id="scroll">
+      <div class="topbar">
+        <div class="brand">
+          <span class="logo">◆</span>
+          <span class="name">Syncu</span>
+          <span id="versionLabel" class="ver"></span>
+        </div>
+        <span id="engineStatus" class="status"><span class="dot"></span><span class="label">Checking…</span></span>
+      </div>
 
-  <section>
-    <h2>1 · Source</h2>
-    <label class="radio"><input type="radio" name="source" value="bins" checked /> Selected bin(s) — one bin per camera/recorder</label>
-    <label class="radio"><input type="radio" name="source" value="auto" /> Selected bin(s) — auto-detect devices</label>
-    <label class="radio"><input type="radio" name="source" value="timeline" /> Active timeline — one track per device</label>
-    <button id="scanBtn">Scan</button>
-    <div id="deviceList" class="list"></div>
-  </section>
+      <!-- 1 · Source -->
+      <div class="section" id="secSource">
+        <div class="section-head" data-toggle="secSource">
+          <span class="chev">▾</span>
+          <span class="step">1</span>
+          <span class="title">Source</span>
+          <span class="sub" id="sourceSub">Choose clips to sync</span>
+        </div>
+        <div class="section-body">
+          <label class="option"><input type="radio" name="source" value="bins" checked />
+            <span class="opt-text"><span class="opt-title">Selected bins</span><span class="opt-desc">One bin per camera or recorder (recommended)</span></span></label>
+          <label class="option"><input type="radio" name="source" value="auto" />
+            <span class="opt-text"><span class="opt-title">Selected bins, auto-detect</span><span class="opt-desc">Group clips by card folder and file name</span></span></label>
+          <label class="option"><input type="radio" name="source" value="timeline" />
+            <span class="opt-text"><span class="opt-title">Active timeline</span><span class="opt-desc">One track per camera or recorder</span></span></label>
+          <div class="row-actions">
+            <button id="scanBtn" class="btn secondary">Scan selection</button>
+          </div>
+          <div id="deviceList" class="devices"></div>
+          <div id="deviceHint" class="hint hidden">Rename a device to merge or split groups.</div>
+        </div>
+      </div>
 
-  <section>
-    <h2>2 · Output</h2>
-    <label class="radio"><input type="radio" name="output" value="timeline" checked /> Synced timeline (all devices, one sequence)</label>
-    <label class="radio"><input type="radio" name="output" value="multicam" /> Multicam-ready (one source sequence per scene)</label>
-    <label class="radio"><input type="radio" name="output" value="takes" /> Per-take sequences + master timeline</label>
-    <label class="check"><input type="checkbox" id="muteScratch" checked /> Mute camera scratch audio</label>
-    <details>
-      <summary>Advanced</summary>
-      <label class="check"><input type="checkbox" id="driftCuts" /> Cut long recordings to fix clock drift</label>
-      <label>Drift tolerance (ms, when cutting) <input id="driftTol" type="text" value="2" /></label>
-      <label class="check"><input type="checkbox" id="trimTakes" /> Per-take mode: trim recorder audio to each take</label>
-      <label>Auto-accept confidence (0.05–0.99) <input id="autoConf" type="text" value="0.5" /></label>
-      <div class="hint">Search accuracy</div>
-      <label class="radio"><input type="radio" name="accuracy" value="1000" /> Fast</label>
-      <label class="radio"><input type="radio" name="accuracy" value="2000" checked /> Normal</label>
-      <label class="radio"><input type="radio" name="accuracy" value="4000" /> High</label>
-    </details>
-  </section>
+      <!-- 2 · Output -->
+      <div class="section" id="secOutput">
+        <div class="section-head" data-toggle="secOutput">
+          <span class="chev">▾</span>
+          <span class="step">2</span>
+          <span class="title">Output</span>
+          <span class="sub" id="outputSub">Synced timeline</span>
+        </div>
+        <div class="section-body">
+          <label class="option"><input type="radio" name="output" value="timeline" checked />
+            <span class="opt-text"><span class="opt-title">Synced timeline</span><span class="opt-desc">Every device on its own track, one sequence</span></span></label>
+          <label class="option"><input type="radio" name="output" value="multicam" />
+            <span class="opt-text"><span class="opt-title">Multicam-ready</span><span class="opt-desc">One aligned source sequence per scene</span></span></label>
+          <label class="option"><input type="radio" name="output" value="takes" />
+            <span class="opt-text"><span class="opt-title">Per-take + master</span><span class="opt-desc">A sequence per take, nested in a master timeline</span></span></label>
 
-  <section>
-    <h2>3 · Sync</h2>
-    <button id="analyzeBtn" class="primary" disabled>Analyze</button>
-    <div id="progress" class="progress hidden"><div id="progressBar"></div><span id="progressText"></span></div>
-    <div id="summary"></div>
-  </section>
+          <label class="check"><input type="checkbox" id="muteScratch" checked /> Mute camera scratch audio</label>
 
-  <section id="reviewSection" class="hidden">
-    <h2>4 · Review</h2>
-    <p class="hint">These need a look. Pick a candidate or nudge, then Re-analyze.</p>
-    <div id="reviewList" class="list"></div>
-    <button id="reanalyzeBtn">Re-analyze with my fixes</button>
-  </section>
+          <div class="subsection" id="secAdvanced">
+            <div class="subsection-head" data-toggle="secAdvanced"><span class="chev">▸</span> Advanced</div>
+            <div class="subsection-body">
+              <label class="check"><input type="checkbox" id="driftCuts" /> Cut long recordings to fix clock drift</label>
+              <div class="field indent">
+                <span class="field-label">Drift tolerance</span>
+                <input id="driftTol" type="text" value="2" class="num" /><span class="unit">ms</span>
+              </div>
+              <label class="check"><input type="checkbox" id="trimTakes" /> Per-take: trim recorder audio to each take</label>
+              <div class="field">
+                <span class="field-label">Auto-accept confidence</span>
+                <input id="autoConf" type="text" value="0.5" class="num" /><span class="unit">0.05–0.99</span>
+              </div>
+              <div class="field-label block">Search accuracy</div>
+              <div class="segmented">
+                <label class="seg"><input type="radio" name="accuracy" value="1000" /> Fast</label>
+                <label class="seg"><input type="radio" name="accuracy" value="2000" checked /> Normal</label>
+                <label class="seg"><input type="radio" name="accuracy" value="4000" /> High</label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-  <section>
-    <button id="buildBtn" class="primary" disabled>Build in Premiere</button>
-  </section>
+      <!-- 3 · Results (appears after Analyze) -->
+      <div class="section hidden" id="secResults">
+        <div class="section-head" data-toggle="secResults">
+          <span class="chev">▾</span>
+          <span class="step">3</span>
+          <span class="title">Results</span>
+          <span class="sub" id="resultsSub"></span>
+        </div>
+        <div class="section-body">
+          <div id="summary"></div>
+          <div id="reviewSection" class="hidden">
+            <div class="group-label">Needs review</div>
+            <div id="reviewList"></div>
+            <div class="row-actions">
+              <button id="reanalyzeBtn" class="btn secondary">Re-analyze with my fixes</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
-  <section>
-    <h2>Report a problem</h2>
-    <button id="copyReportBtn">Copy report for Claude</button>
-    <button id="saveReportBtn">Save report…</button>
-    <div id="reportStatus" class="hint"></div>
-    <details>
-      <summary>Diagnostics</summary>
-      <button id="selfTestBtn">Run Premiere API self-test</button>
-      <pre id="log"></pre>
-    </details>
-  </section>
+      <!-- Help & diagnostics -->
+      <div class="section collapsed" id="secHelp">
+        <div class="section-head" data-toggle="secHelp">
+          <span class="chev">▸</span>
+          <span class="step ghost">?</span>
+          <span class="title">Help &amp; diagnostics</span>
+          <span class="sub">Report a problem</span>
+        </div>
+        <div class="section-body">
+          <p class="hint">Something wrong? Copy a report and paste it to Claude.</p>
+          <div class="row-actions">
+            <button id="copyReportBtn" class="btn secondary">Copy report</button>
+            <button id="saveReportBtn" class="btn quiet">Save…</button>
+          </div>
+          <div id="reportStatus" class="hint"></div>
+          <div class="row-actions">
+            <button id="selfTestBtn" class="btn quiet">Run Premiere self-test</button>
+          </div>
+          <div class="group-label">Log</div>
+          <pre id="log"></pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- Always-visible action bar -->
+    <div id="footer">
+      <div id="progress" class="progress hidden">
+        <div class="track"><div id="progressBar"></div></div>
+        <span id="progressText"></span>
+      </div>
+      <div class="actions">
+        <button id="analyzeBtn" class="btn secondary grow" disabled>Analyze</button>
+        <button id="buildBtn" class="btn primary grow" disabled>Build in Premiere</button>
+      </div>
+    </div>
+  </div>
 
   <script src="js/log.js"></script>
   <script src="js/engine.js"></script>
