@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
+
+# Run on macOS 12+ even when built on a newer Mac (must precede project()).
+set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
+# Windows: link the C++ runtime statically so no VC++ redistributable is needed.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 project(syncu_engine CXX)
 
 set(CMAKE_CXX_STANDARD 17)
