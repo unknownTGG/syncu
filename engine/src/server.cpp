@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -38,7 +39,7 @@ namespace syncu {
 
 namespace {
 
-const char* kVersion = "0.1.9";
+const char* kVersion = "0.1.10";
 
 struct Job {
   std::atomic<double> progress{0.0};
@@ -58,6 +59,61 @@ struct UpdateState {
   std::string state = "idle";  // idle | running | restarting | failed
   std::string message;
 } g_update;
+
+// The panel's log, kept here so it survives Premiere crashing (and, via the
+// file, the helper restarting). The report shows the previous session.
+struct PanelLog {
+  std::mutex mu;
+  std::deque<std::string> lines;
+  bool loaded = false;
+} g_panelLog;
+
+std::string panelLogPath() {
+#if defined(_WIN32)
+  const char* tmp = std::getenv("TEMP");
+  return std::string(tmp ? tmp : "C:\\Windows\\Temp") + "\\syncu-panel.log";
+#else
+  return "/tmp/syncu-panel.log";
+#endif
+}
+
+void panelLogLoad() {  // caller holds the lock
+  if (g_panelLog.loaded) return;
+  g_panelLog.loaded = true;
+  if (std::FILE* f = std::fopen(panelLogPath().c_str(), "rb")) {
+    char b[8192];
+    std::string cur;
+    while (std::fgets(b, sizeof(b), f)) {
+      cur = b;
+      while (!cur.empty() && (cur.back() == '\n' || cur.back() == '\r')) cur.pop_back();
+      g_panelLog.lines.push_back(cur);
+      if (g_panelLog.lines.size() > 3000) g_panelLog.lines.pop_front();
+    }
+    std::fclose(f);
+  }
+}
+
+void panelLogAppend(const std::vector<std::string>& add) {
+  std::lock_guard<std::mutex> l(g_panelLog.mu);
+  panelLogLoad();
+  for (const auto& x : add) {
+    g_panelLog.lines.push_back(x);
+    if (g_panelLog.lines.size() > 3000) g_panelLog.lines.pop_front();
+  }
+  // Rewrite when the file has grown well past what we keep, else append.
+  static size_t sinceRewrite = 0;
+  sinceRewrite += add.size();
+  const bool rewrite = sinceRewrite > 6000;
+  if (std::FILE* f = std::fopen(panelLogPath().c_str(), rewrite ? "wb" : "ab")) {
+    if (rewrite) {
+      for (const auto& x : g_panelLog.lines) std::fprintf(f, "%s\n", x.c_str());
+      sinceRewrite = 0;
+    } else {
+      for (const auto& x : add) std::fprintf(f, "%s\n", x.c_str());
+    }
+    std::fclose(f);
+  }
+}
 
 const char* kReleasePrefix = "https://github.com/unknownTGG/syncu/releases/download/";
 
@@ -252,6 +308,21 @@ void handle(sock_t s) {
                            {"ffmpegVersion", ffv}, {"os", os}}.dump());
     } else if (req.method == "GET" && req.path == "/log") {
       respond(s, 200, json{{"ok", true}, {"lines", recentLog(1500)}}.dump());
+    } else if (req.method == "POST" && req.path == "/panel-log") {
+      auto j = json::parse(req.body);
+      std::vector<std::string> add;
+      for (const auto& x : j.value("lines", json::array()))
+        if (x.is_string()) add.push_back(x.get<std::string>().substr(0, 4000));
+      panelLogAppend(add);
+      respond(s, 200, R"({"ok":true})");
+    } else if (req.method == "GET" && req.path == "/panel-log") {
+      std::vector<std::string> out;
+      {
+        std::lock_guard<std::mutex> l(g_panelLog.mu);
+        panelLogLoad();
+        out.assign(g_panelLog.lines.begin(), g_panelLog.lines.end());
+      }
+      respond(s, 200, json{{"ok", true}, {"lines", out}}.dump());
     } else if (req.method == "POST" && req.path == "/analyze") {
       std::string body = sanitize(req.body);
       auto job = std::make_shared<Job>();

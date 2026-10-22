@@ -2,7 +2,7 @@
 // single "Copy report" gives the full picture (panel + helper).
 window.Syncu = window.Syncu || {};
 
-Syncu.VERSION = "0.1.9";
+Syncu.VERSION = "0.1.10";
 
 (() => {
   const lines = [];
@@ -43,39 +43,56 @@ Syncu.VERSION = "0.1.9";
     if (lines.length > MAX) lines.splice(0, lines.length - MAX);
     (level === "error" ? console.error : console.log)("[syncu]", line);
     if (listener) listener(line, level);
-    scheduleFlush();
+    scheduleFlush(line);
   };
   Syncu.log.errText = errText;
   Syncu.log.lines = () => lines.slice();
   Syncu.log.onLine = (fn) => (listener = fn);
 
-  // Persist to the plugin data folder so a crash or reload doesn't lose it.
-  function scheduleFlush() {
-    if (flushTimer) return;
-    flushTimer = setTimeout(async () => {
-      flushTimer = null;
-      try {
-        const lfs = require("uxp").storage.localFileSystem;
-        const folder = await lfs.getDataFolder();
-        const file = await folder.createFile("syncu-log.txt", { overwrite: true });
-        await file.write(lines.join("\n"));
-      } catch (e) {
-        /* logging must never break the panel */
-      }
-    }, 2000);
-  }
-
-  // Load the previous session's log so it can go into a report.
-  Syncu.log.previous = async () => {
+  // Every line also goes to the helper, which keeps it on disk: if Premiere
+  // crashes mid-build, the next report still shows where it got to.
+  const HELPER = "http://127.0.0.1:47800/panel-log";
+  let pending = [];
+  let previous = [];
+  // Fetch what the helper kept from earlier sessions before adding to it.
+  const ready = (async () => {
     try {
-      const lfs = require("uxp").storage.localFileSystem;
-      const folder = await lfs.getDataFolder();
-      const file = await folder.getEntry("syncu-log.txt");
-      return await file.read();
+      const res = await fetch(HELPER, { headers: { "X-Syncu": "1" } });
+      previous = (await res.json()).lines || [];
     } catch (e) {
-      return "";
+      previous = [];
     }
+  })();
+
+  async function send() {
+    if (flushTimer) clearTimeout(flushTimer), (flushTimer = null);
+    await ready;
+    if (!pending.length) return;
+    const batch = pending;
+    pending = [];
+    try {
+      await fetch(HELPER, {
+        method: "POST",
+        headers: { "X-Syncu": "1", "Content-Type": "application/json" },
+        body: JSON.stringify({ lines: batch }),
+      });
+    } catch (e) {
+      // Helper down: keep a bounded backlog for when it's back.
+      pending = batch.concat(pending).slice(-500);
+    }
+  }
+  function scheduleFlush(line) {
+    pending.push(line);
+    if (!flushTimer) flushTimer = setTimeout(send, 250);
+  }
+  // Awaited before risky Premiere calls, so the log is saved if one crashes.
+  Syncu.log.flush = () => send().catch(() => {});
+  // Lines saved by the helper from before this panel session started.
+  Syncu.log.previous = async () => {
+    await ready;
+    return previous.slice();
   };
+  setTimeout(() => Syncu.log(`--- panel session ${Syncu.VERSION} started ---`), 0);
 
   window.addEventListener("error", (ev) => Syncu.log("error", `uncaught: ${ev.message} at ${ev.filename}:${ev.lineno}`));
   window.addEventListener("unhandledrejection", (ev) => Syncu.log("error", `unhandled promise: ${errText(ev.reason)}`));
@@ -154,6 +171,15 @@ Syncu.VERSION = "0.1.9";
 
     sec("panel log");
     out.push(...lines.slice(-600));
+
+    // After a crash this is the session that was running at the time.
+    const prev = await Syncu.log.previous();
+    if (prev.length) {
+      sec("previous panel session (saved by the helper)");
+      let start = prev.length;
+      while (start > 0 && !/--- panel session .* started ---/.test(prev[start - 1])) start--;
+      out.push(...prev.slice(Math.max(0, start - 1, prev.length - 400)));
+    }
 
     sec("helper log");
     try {

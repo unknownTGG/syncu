@@ -313,11 +313,37 @@ Syncu.build = (() => {
   // ---- Execution in Premiere ----
   // replan(frameTicks) rebuilds the plan once the real sequence frame
   // duration is known (from the first sequence Premiere creates).
+  // A bad number (NaN, negative time, absurd track) handed to Premiere can
+  // crash it outright, so check every placement first and skip bad ones.
+  function validatePlan(plan, byId, log) {
+    const okNum = (x) => typeof x === "number" && Number.isFinite(x);
+    for (const sp of plan.sequences) {
+      const before = sp.placements.length;
+      sp.placements = sp.placements.filter((p) => {
+        const c = byId.get(p.clipId);
+        const why =
+          !c || !c.projectItem ? "clip not in the project" :
+          !okNum(p.pos) || p.pos < 0 || p.pos > 7 * 24 * 3600 ? `bad position ${p.pos}` :
+          !Number.isInteger(p.audioTrack) || p.audioTrack < 0 || p.audioTrack > 98 ? `bad audio track ${p.audioTrack}` :
+          p.kind === "av" && (!Number.isInteger(p.videoTrack) || p.videoTrack < 0 || p.videoTrack > 98) ? `bad video track ${p.videoTrack}` :
+          p.kind === "audio" && (!okNum(p.srcIn) || !okNum(p.srcOut) || p.srcIn < 0 || p.srcOut <= p.srcIn) ? `bad source range ${p.srcIn}-${p.srcOut}` :
+          "";
+        if (why) log("warn", `skipping ${p.name || p.clipId}: ${why}`);
+        return !why;
+      });
+      if (sp.placements.length < before) log("warn", `"${sp.name}": ${before - sp.placements.length} placement(s) skipped as invalid`);
+      if (!Number.isInteger(sp.stagingTrack) || sp.stagingTrack < 0 || sp.stagingTrack > 98) throw new Error(`bad staging track ${sp.stagingTrack}`);
+      sp.markers = (sp.markers || []).filter((m) => okNum(m.time) && m.time >= 0 && (m.duration === undefined || (okNum(m.duration) && m.duration >= 0)));
+    }
+    return plan;
+  }
+
   async function executePlan(plan, clips, onStep, replan) {
     const pp = Syncu.pp;
     const log = (...a) => Syncu.log(...a);
     const proj = await pp.refreshItems(clips);
     const byId = new Map(clips.map((c) => [c.id, c]));
+    validatePlan(plan, byId, log);
     const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
     const bin = await pp.ensureBin(proj, `Syncu ${stamp}`);
     const made = [];
@@ -327,12 +353,14 @@ Syncu.build = (() => {
     for (let si = 0; si < plan.sequences.length; si++) {
       let sp = plan.sequences[si];
       const settings = byId.get(sp.settingsClipId);
+      log(`creating sequence "${sp.name}" (${sp.placements.length} placements)`);
+      await Syncu.log.flush();
       const seq = await pp.createSequence(proj, sp.name, settings.projectItem, bin);
       if (si === 0 && replan) {
         const ft = await pp.frameTicks(seq);
         if (ft && ft !== plan.frameTicks) {
           log(`sequence frame is ${ft} ticks (planned with ${plan.frameTicks}); re-planning`);
-          plan = replan(ft);
+          plan = validatePlan(replan(ft), byId, log);
           sp = plan.sequences[0];
         }
       }
@@ -340,6 +368,8 @@ Syncu.build = (() => {
       const nV = Math.max(1, ...sp.placements.filter((p) => p.kind === "av").map((p) => p.videoTrack + 1));
       const nA = Math.max(sp.stagingTrack + 1, ...sp.placements.map((p) => p.audioTrack + 1));
       const firstAudio = sp.placements.find((p) => p.kind === "audio");
+      log(`making tracks V${nV} A${nA}`);
+      await Syncu.log.flush();
       await pp.ensureTracks(proj, seq, nV, nA, settings.projectItem, firstAudio ? byId.get(firstAudio.clipId).projectItem : null);
 
       // Cameras (video + scratch audio) in one undo step. Video can only sit
@@ -348,12 +378,10 @@ Syncu.build = (() => {
       const simple = sp.placements.filter((p) => p.kind === "av" || (!exactAudio && p.whole));
       const audioExact = sp.placements.filter((p) => p.kind === "audio" && !simple.includes(p));
       log(`"${sp.name}": placing ${simple.length} clip(s) directly, ${audioExact.length} audio clip(s) sample-accurately`);
-      pp.transact(proj, `Syncu: place clips (${sp.name})`, () =>
-        simple.map((p) =>
-          p.kind === "av"
-            ? pp.overwriteAction(seq, byId.get(p.clipId).projectItem, p.pos, p.videoTrack, p.audioTrack)
-            : pp.overwriteAction(seq, byId.get(p.clipId).projectItem, p.pos - p.srcIn, 0, p.audioTrack)
-        )
+      await pp.transactInBatches(proj, `Syncu: place clips (${sp.name})`, simple, (p) =>
+        p.kind === "av"
+          ? pp.overwriteAction(seq, byId.get(p.clipId).projectItem, p.pos, p.videoTrack, p.audioTrack)
+          : pp.overwriteAction(seq, byId.get(p.clipId).projectItem, p.pos - p.srcIn, 0, p.audioTrack)
       );
       step += simple.length;
       if (onStep) onStep(step / total, sp.name);
@@ -371,8 +399,11 @@ Syncu.build = (() => {
       // each placed to the sample and verified.
       let worst = 0;
       for (const p of audioExact) {
+        log("debug", `placing ${p.name} on A${p.audioTrack + 1} at ${p.pos.toFixed(6)}`);
+        await Syncu.log.flush();
         const err = await pp.placeAudioExact(proj, seq, byId.get(p.clipId).projectItem, p.srcIn, p.srcOut, p.pos, p.audioTrack, sp.stagingTrack, p.whole);
         worst = Math.max(worst, Math.abs(err));
+        await pp.sleep(20);
         step++;
         if (onStep) onStep(step / total, sp.name);
       }
@@ -411,5 +442,5 @@ Syncu.build = (() => {
     return made;
   }
 
-  return { planBuild, executePlan, snap, ceilFrame };
+  return { planBuild, executePlan, validatePlan, snap, ceilFrame };
 })();

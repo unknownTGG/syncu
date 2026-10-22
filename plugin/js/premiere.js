@@ -9,6 +9,14 @@ Syncu.pp = (() => {
   const log = (...a) => Syncu.log(...a);
 
   function ticks(seconds) {
+    // Never hand Premiere a non-number or negative time (it can crash on one).
+    if (!Number.isFinite(seconds) || seconds < -1e-9) throw new Error(`invalid time ${seconds}`);
+    return ppro.TickTime.createWithTicks(String(Math.max(0, Math.round(seconds * TICKS_PER_SECOND))));
+  }
+
+  // A relative shift (clone offset, move): may be negative, never NaN.
+  function ticksRel(seconds) {
+    if (!Number.isFinite(seconds)) throw new Error(`invalid time offset ${seconds}`);
     return ppro.TickTime.createWithTicks(String(Math.round(seconds * TICKS_PER_SECOND)));
   }
 
@@ -48,6 +56,20 @@ Syncu.pp = (() => {
       throw error;
     }
     if (!ok) throw new Error(`Premiere rejected "${label}" (${count} actions)`);
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Many edits in one action have crashed Premiere; send them in small
+  // batches, saving the log and letting Premiere settle before each one.
+  async function transactInBatches(proj, label, items, makeAction, size = 15) {
+    for (let i = 0; i < items.length; i += size) {
+      const part = items.slice(i, i + size);
+      log(`${label}: ${i + 1}-${i + part.length} of ${items.length}`);
+      await Syncu.log.flush();
+      transact(proj, `${label} (${i + 1}-${i + part.length})`, () => part.map(makeAction));
+      await sleep(40);
+    }
   }
 
   function itemName(item) {
@@ -362,7 +384,9 @@ Syncu.pp = (() => {
   // error in seconds (0 = sample accurate).
   async function placeAudioExact(proj, seq, projectItem, srcIn, srcOut, pos, track, stagingTrack, fullLength) {
     const wantZero = pos - srcIn;
-    transact(proj, "Syncu: stage audio", () => [overwriteAction(seq, projectItem, wantZero, 0, stagingTrack)]);
+    // A trimmed piece's clip start can fall before 0 (in-point later than its
+    // position): stage it at 0 and let the clone offset move it.
+    transact(proj, "Syncu: stage audio", () => [overwriteAction(seq, projectItem, Math.max(0, wantZero), 0, stagingTrack)]);
     const staged = await trackItemsOn(seq, "audio", stagingTrack);
     if (staged.length !== 1) throw new Error(`staging track A${stagingTrack + 1} has ${staged.length} items (expected 1)`);
     let ti = staged[0];
@@ -373,7 +397,7 @@ Syncu.pp = (() => {
     const stagedErr = (await zeroOf(ti)) - wantZero; // what Premiere's snapping did
     const editor = ppro.SequenceEditor.getEditor(seq);
     transact(proj, "Syncu: place audio", () => [
-      editor.createCloneTrackItemAction(ti, ticks(-stagedErr), 0, track - stagingTrack, false, false),
+      editor.createCloneTrackItemAction(ti, ticksRel(-stagedErr), 0, track - stagingTrack, false, false),
     ]);
     await removeItems(proj, seq, [ti], "Syncu: clear staging");
 
@@ -391,7 +415,7 @@ Syncu.pp = (() => {
     // Clone snapped as well: try a sub-frame move on the placed clip.
     if (subFrame.method !== "none") {
       try {
-        transact(proj, "Syncu: nudge audio", () => [placed.createMoveAction(ticks(-err))]);
+        transact(proj, "Syncu: nudge audio", () => [placed.createMoveAction(ticksRel(-err))]);
         placed = await findPlaced(seq, track, projectItem, pos);
         const err2 = (await zeroOf(placed)) - wantZero;
         if (Math.abs(err2) <= tol) {
@@ -429,8 +453,8 @@ Syncu.pp = (() => {
     if (!markers.length) return;
     try {
       const m = await ppro.Markers.getMarkers(seq);
-      transact(proj, "Syncu: markers", () =>
-        markers.map((k) => m.createAddMarkerAction(k.name, "Comment", ticks(k.time), ticks(k.duration || 0), k.comment || ""))
+      await transactInBatches(proj, "Syncu: markers", markers, (k) =>
+        m.createAddMarkerAction(k.name, "Comment", ticks(k.time), ticks(k.duration || 0), k.comment || "")
       );
     } catch (e) {
       log("warn", `markers not added: ${Syncu.log.errText(e)}`);
@@ -595,7 +619,7 @@ Syncu.pp = (() => {
   }
 
   return {
-    ppro, ticks, seconds, project, transact, itemName, refreshItems, isStale,
+    ppro, ticks, seconds, project, transact, transactInBatches, sleep, itemName, refreshItems, isStale,
     selectedClips, timelineClips, ensureBin, createSequence, allTrackItems, ensureTracks,
     removeItems, overwriteAction, trackItemsOn, placeAudioPiece, placeAudioExact, muteAudioTrack, addMarkers,
     subFrame, zeroOf,

@@ -175,8 +175,12 @@ async function main() {
     check(`report has "${s}"`, clipboard.includes(`===== ${s}`));
   check("report includes helper log lines", /analyze done in/.test(clipboard));
   fs.writeFileSync(path.join(MEDIA, "sim-report.txt"), clipboard);
-  await sleep(2500);
-  check("log persisted to data folder", (memFiles["syncu-log.txt"] || "").includes("build"));
+  await sleep(1000);
+  // The panel log lives on in the helper, so a Premiere crash can't lose it.
+  const saved = await (await fetch("http://127.0.0.1:47800/panel-log", { headers: { "X-Syncu": "1" } })).json();
+  check("panel log saved by the helper", (saved.lines || []).some((l) => /place clips/.test(l)), `${(saved.lines || []).length} lines`);
+  const biggest = Math.max(0, ...mock.actionLog.map((l) => Number((l.match(/\((\d+)\)$/) || [0, 0])[1])));
+  check("no Premiere action has more than 15 edits", biggest <= 15, `largest ${biggest}`);
 
   const errLines = w.Syncu.log.lines().join("\n").split("\n").filter((l) => l.includes("[error]"));
   check("no errors logged", errLines.length === 0, errLines.slice(0, 5).join(" | "));
