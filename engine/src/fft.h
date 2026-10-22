@@ -26,4 +26,11 @@ std::vector<float> crossCorrelateSpec(const std::vector<cfloat>& specA, size_t n
                                       size_t lenA, const std::vector<float>& b,
                                       bool phat);
 
+// Generalised cross-correlation with the cross-spectrum divided by its
+// magnitude^beta (beta = 1 is PHAT, 0 is plain correlation), keeping only
+// bins between loHz and hiHz. Same lag layout as crossCorrelate.
+std::vector<float> crossCorrelateWeighted(const std::vector<float>& a,
+                                          const std::vector<float>& b, int rate,
+                                          float beta, double loHz, double hiHz);
+
 }  // namespace syncu

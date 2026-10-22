@@ -244,7 +244,9 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
         double ss = 0.0;
         for (float x : node.coarse) ss += double(x) * x;
         const double rms = std::sqrt(ss / double(node.coarse.size()));
-        if (rms < 1e-3) {  // below -60 dBFS
+        // Far cameras can sit around -60 dBFS and still match fine (the
+        // matching is level-independent), so only near-digital silence counts.
+        if (rms < 1e-4) {  // below -80 dBFS
           logInfo("audio is silent (" + fmt("%.1f dBFS", 20 * std::log10(rms + 1e-12)) +
                   "), placing by time: " + clips[node.lead].path);
           node.coarse.clear();
@@ -320,7 +322,7 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
       if (e.status == "used")
         logInfo("  " + e.status + " " + e.a + " <- " + e.b +
                 fmt(" offset %.6f s conf %.2f ratio %.2f", e.match.offset, e.match.confidence, e.match.peakRatio) +
-                fmt(" corr %.2f overlap %.1f s", e.match.correlation, e.match.overlap));
+                fmt(" corr %.2f agree %.2f overlap %.1f s", e.match.correlation, e.match.agreement, e.match.overlap));
   }
 
   // Manual edges from the Review panel override automatic ones.
@@ -413,6 +415,25 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
       members[cb].clear();
     }
     if (rejected) logInfo(std::to_string(rejected) + " match(es) rejected as inconsistent");
+
+    // A weaker match that independently lands where the accepted ones put
+    // its clips is confirmed (chance matches don't line up within 50 ms).
+    // This mostly brings in each camera's direct match to the recorder,
+    // which pins it more precisely than going through another camera.
+    int confirmed = 0;
+    for (size_t i = 0; i < edges.size(); ++i) {
+      auto& e = edges[i];
+      if (e.status != "review") continue;
+      const auto [A, B] = edgeNodes[i];
+      if (root[A] != root[B]) continue;
+      const double err = (rel[B] - rel[A]) - e.match.offset;
+      if (std::fabs(err) > 0.05) continue;
+      e.status = "used";
+      ++confirmed;
+      logInfo("  confirmed " + e.a + " <- " + e.b + fmt(" offset %.6f s conf %.2f (agrees within %.1f ms)",
+                                                       e.match.offset, e.match.confidence, std::fabs(err) * 1e3));
+    }
+    if (confirmed) logInfo(std::to_string(confirmed) + " weaker match(es) confirmed by the others");
   }
 
   // ---- 4. Observations per edge (drift-measured for long overlaps). ----
@@ -424,7 +445,10 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
     const auto [A, B] = edgeNodes[i];
     const double ovS = std::max(0.0, -e.match.offset);
     const double ovE = std::min(nodes[B].duration, nodes[A].duration - e.match.offset);
-    const double w = e.status == "manual" ? 10.0 : e.match.confidence;
+    // Cameras are pinned mainly by their match to a recorder: two distant,
+    // reverberant camera mics agree with each other less precisely.
+    const double camCam = nodes[A].isVideo && nodes[B].isVideo ? 0.1 : 1.0;
+    const double w = e.status == "manual" ? 10.0 : e.match.confidence * camCam;
     const double tB = e.status == "manual" ? 0.5 * (ovS + ovE) : e.match.timeB;
     obs[i].push_back({tB, e.match.offset, w});
     if (e.match.overlap >= opts.driftMinOverlap && nodes[A].lead != SIZE_MAX &&
@@ -448,8 +472,10 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
       logInfo("drift " + edges[i].a + " <- " + edges[i].b +
               fmt(": %.2f ppm, rms %.1f us, %g points", r.ppm, r.residualRms * 1e6, double(r.points.size())) +
               (r.valid ? "" : " (not enough clean windows; ignored)"));
-      if (r.valid) {
-        const double w = edges[i].match.confidence;
+      // A noisy fit (rms over 1 ms) means the windows didn't lock cleanly.
+      if (r.valid && r.residualRms < 1e-3) {
+        const double w = edges[i].match.confidence *
+                         (nodes[A].isVideo && nodes[B].isVideo ? 0.1 : 1.0);
         std::vector<Obs> pts;
         for (const auto& p : r.points)
           if (p.inlier) pts.push_back({p.timeB, p.offset, w});

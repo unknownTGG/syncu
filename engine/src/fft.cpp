@@ -57,4 +57,34 @@ std::vector<float> crossCorrelateSpec(const std::vector<cfloat>& specA, size_t n
   return out;
 }
 
+std::vector<float> crossCorrelateWeighted(const std::vector<float>& a,
+                                          const std::vector<float>& b, int rate,
+                                          float beta, double loHz, double hiHz) {
+  if (a.empty() || b.empty()) return {};
+  const size_t n = fftSize(a.size() + b.size() - 1);
+  std::vector<cfloat> x = spectrum(b, n);
+  const std::vector<cfloat> sa = spectrum(a, n);
+  const double binHz = double(rate) / double(n);
+  for (size_t i = 0; i < x.size(); ++i) {
+    const double f = double(i) * binHz;
+    if (f < loHz || f > hiHz) { x[i] = cfloat(0.0f, 0.0f); continue; }
+    const float ar = sa[i].real(), ai = sa[i].imag();
+    const float br = x[i].real(), bi = x[i].imag();
+    float re = ar * br + ai * bi, im = ai * br - ar * bi;
+    const float m = std::pow(std::sqrt(re * re + im * im), beta);
+    if (m > 1e-20f) re /= m, im /= m;
+    else re = im = 0.0f;
+    x[i] = cfloat(re, im);
+  }
+  std::vector<float> circ(n);
+  pocketfft::c2r<float>({n}, {sizeof(cfloat)}, {sizeof(float)}, 0, pocketfft::BACKWARD,
+                        x.data(), circ.data(), 1.0f / float(n));
+  const size_t outLen = a.size() + b.size() - 1;
+  std::vector<float> out(outLen);
+  const size_t negCount = b.size() - 1;
+  for (size_t i = 0; i < negCount; ++i) out[i] = circ[n - negCount + i];
+  for (size_t i = 0; i < a.size(); ++i) out[negCount + i] = circ[i];
+  return out;
+}
+
 }  // namespace syncu

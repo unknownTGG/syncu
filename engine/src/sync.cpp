@@ -74,8 +74,9 @@ std::vector<Candidate> coarseSearch(const std::vector<float>& a,
   if (valid == 0) return {};
   const float noise = float(std::sqrt(sumSq / double(valid))) + 1e-12f;
 
-  // Pick peaks, excluding +/-50 ms around each one already taken.
-  const long long excl = std::max(1LL, (long long)(0.05 * rate));
+  // Pick peaks, excluding +/-250 ms around each one already taken: closer
+  // peaks are echoes or pitch repeats of the same match, not alternatives.
+  const long long excl = std::max(1LL, (long long)(0.25 * rate));
   std::vector<Candidate> out;
   for (int c = 0; c < maxCandidates; ++c) {
     size_t best = 0;
@@ -106,6 +107,12 @@ double refineOffset(const std::vector<float>& aSegIn, double aStart,
     throw std::runtime_error("refineOffset: A segment must cover B segment");
 
   std::vector<float> r = crossCorrelate(a, b, /*phat=*/false);
+  // The peak is located on a whitened, band-limited correlation: distant,
+  // reverberant mics are dominated by low rumble/wind, whose broad plain-
+  // correlation peak can sit several ms off. Plain correlation is kept for
+  // the reported similarity.
+  std::vector<float> w = crossCorrelateWeighted(
+      a, b, rate, 0.7f, 100.0, std::min(8000.0, 0.45 * rate));
   const long long lenA = (long long)a.size(), lenB = (long long)b.size();
 
   // Energy of each length-lenB window of A, via prefix sums.
@@ -123,17 +130,108 @@ double refineOffset(const std::vector<float>& aSegIn, double aStart,
 
   const long long k0 = std::llround((bStart + guess - aStart) * rate);
   const long long s = std::max(1LL, (long long)std::ceil(search * rate));
+  auto wAt = [&](long long k) -> double {
+    if (k < 0 || k + lenB > lenA) return 0.0;
+    return double(w[size_t(k + lenB - 1)]);
+  };
   long long bestK = k0;
-  double bestV = 0.0;
+  double bestW = 0.0;
   for (long long k = k0 - s; k <= k0 + s; ++k) {
-    double v = norm(k);
-    if (std::fabs(v) > std::fabs(bestV)) bestV = v, bestK = k;
+    double v = wAt(k);
+    if (std::fabs(v) > std::fabs(bestW)) bestW = v, bestK = k;
   }
-  const double sign = bestV < 0 ? -1.0 : 1.0;
-  double frac = parabolicPeak(sign * norm(bestK - 1), sign * bestV,
-                              sign * norm(bestK + 1));
+  const double bestV = norm(bestK);
+  const double sign = bestW < 0 ? -1.0 : 1.0;
+  double frac = parabolicPeak(sign * wAt(bestK - 1), sign * bestW,
+                              sign * wAt(bestK + 1));
   if (corr) *corr = float(bestV);
   return aStart + (double(bestK) + frac) / rate - bStart;
+}
+
+double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
+                      int rate, double offset, double ovS, double ovE,
+                      double* refined, double* bestT) {
+  *refined = offset;
+  if (bestT) *bestT = -1.0;
+  const double ov = ovE - ovS;
+  if (ov <= 0.0) return 0.0;
+  const double win = std::min(5.0, ov);
+  const int K = std::max(1, std::min(10, int(ov / win)));
+  const long long L = std::max<long long>(4, std::llround(0.02 * rate));
+  const long long tol = std::max<long long>(1, std::llround(0.0015 * rate));
+  const long long n = std::llround(win * rate);
+  int counted = 0;
+  struct Win { double lag, sharp, t; };
+  std::vector<Win> wins;
+  for (int k = 0; k < K; ++k) {
+    const double t = ovS + (K == 1 ? 0.0 : (ov - win) * k / (K - 1));
+    const long long b0 = std::llround(t * rate);
+    const long long a0 = std::llround((t + offset) * rate) - L;
+    if (b0 < 0 || b0 + n > (long long)b.size()) continue;
+    if (a0 < 0 || a0 + n + 2 * L > (long long)a.size()) continue;
+    std::vector<float> bw(b.begin() + b0, b.begin() + b0 + n);
+    std::vector<float> aw(a.begin() + a0, a.begin() + a0 + n + 2 * L);
+    double eb = 0.0, ea = 0.0;
+    for (float v : bw) eb += double(v) * v;
+    for (float v : aw) ea += double(v) * v;
+    if (eb < 1e-14 * n || ea < 1e-14 * n) continue;  // digital silence here
+    ++counted;
+    // Whitened (PHAT) like the whole-file search, so rumble can't dominate.
+    removeDc(aw);
+    removeDc(bw);
+    std::vector<float> r = crossCorrelate(aw, bw, /*phat=*/true);
+    // Lag j - L (j in [0, 2L]) sits at index j + n - 1.
+    long long best = 0;
+    for (long long j = 0; j <= 2 * L; ++j)
+      if (r[size_t(j + n - 1)] > r[size_t(best + n - 1)]) best = j;
+    // Polarity may be inverted: take the larger magnitude of either sign.
+    long long bestN = 0;
+    for (long long j = 0; j <= 2 * L; ++j)
+      if (r[size_t(j + n - 1)] < r[size_t(bestN + n - 1)]) bestN = j;
+    if (-r[size_t(bestN + n - 1)] > r[size_t(best + n - 1)]) best = bestN;
+    const double sg = r[size_t(best + n - 1)] < 0 ? -1.0 : 1.0;
+    double frac = (best > 0 && best < 2 * L)
+                      ? parabolicPeak(sg * r[size_t(best + n - 2)], sg * r[size_t(best + n - 1)],
+                                      sg * r[size_t(best + n)])
+                      : 0.0;
+    const double lag = double(best - L) + frac;
+    double rms = 0.0;
+    for (long long j = 0; j <= 2 * L; ++j) rms += double(r[size_t(j + n - 1)]) * r[size_t(j + n - 1)];
+    const double sharp = std::fabs(r[size_t(best + n - 1)]) / std::sqrt(rms / double(2 * L + 1) + 1e-30);
+    wins.push_back({lag, sharp, t});
+  }
+  // The windows may agree with each other on a lag a few ms from the
+  // whole-file peak (which can sit on a strong echo): take the largest
+  // cluster of agreeing windows, preferring the one nearest the peak.
+  int agreed = 0;
+  double centre = 0.0;
+  for (const auto& w : wins) {
+    int c = 0;
+    for (const auto& v : wins) c += std::fabs(v.lag - w.lag) <= double(tol);
+    if (c > agreed || (c == agreed && std::fabs(w.lag) < std::fabs(centre))) agreed = c, centre = w.lag;
+  }
+  std::vector<double> lags;
+  double bestPeak = 0.0;
+  for (const auto& w : wins) {
+    if (std::fabs(w.lag - centre) > double(tol)) continue;
+    lags.push_back(w.lag);
+    // Sharpest agreeing window = clearest shared sound (speech, not wind).
+    if (w.sharp > bestPeak) {
+      bestPeak = w.sharp;
+      if (bestT) *bestT = w.t;
+    }
+  }
+  if (!lags.empty()) {
+    std::nth_element(lags.begin(), lags.begin() + lags.size() / 2, lags.end());
+    *refined = offset + lags[lags.size() / 2] / rate;
+  }
+  // Real matches agree in most windows (60-100% even on distant, windy
+  // cameras); unrelated audio only forms a chance cluster of a few. So ask
+  // for at least three agreeing windows and about half of all of them; a
+  // short overlap with fewer windows can't fully vouch for a match.
+  if (counted == 0) return 0.0;
+  const double share = double(agreed) / counted;
+  return std::min(1.0, agreed / 3.0) * std::clamp((share - 0.2) / 0.3, 0.0, 1.0);
 }
 
 std::vector<float> computeEnvelope(const std::vector<float>& x, int rate,
@@ -189,9 +287,16 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
 
   // Confidence: a match needs a clearly unique coarse peak (ratio), a peak
   // well above the noise floor (score), and real waveform similarity.
-  const float cRatio = clamp01((res.peakRatio - 1.0f) / 1.5f);
+  const float cRatio = clamp01((res.peakRatio - 1.0f) / 1.2f);
   const float cScore = clamp01((best.score - 6.0f) / 14.0f);
-  const float coarseConf = std::sqrt(cRatio * cScore);
+  float coarseConf = std::sqrt(cRatio * cScore);
+  // A real match lines up the same way all through the overlap; a chance
+  // peak doesn't. Check short windows across it independently.
+  double guess = best.offset, bestT = -1.0;
+  if (coarseConf >= opts.refineMinCoarse) {
+    res.agreement = float(checkAgreement(a, b, opts.coarseRate, best.offset, ovS, ovE, &guess, &bestT));
+    coarseConf *= res.agreement;
+  }
   if (coarseConf < opts.refineMinCoarse) {
     res.offset = best.offset;
     res.timeB = 0.5 * (ovS + ovE);
@@ -215,7 +320,10 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
     if (i + wHops < env.size()) run += env[i + wHops] * env[i + wHops];
     run -= env[i] * env[i];
   }
-  const double bStart = std::max(ovS, double(bestI) * hop);
+  double bStart = std::max(ovS, double(bestI) * hop);
+  // Prefer the stretch where the agreement check locked most clearly: on a
+  // distant, windy camera the loudest stretch is often just wind.
+  if (bestT >= 0.0) bStart = std::clamp(bestT + 2.5 - 0.5 * win, ovS, std::max(ovS, ovE - win));
 
   const double pad = opts.fineSearch + 0.002;
   DecodeOptions fa, fb;
@@ -224,7 +332,7 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
   fb.channel = opts.channelB;
   fb.start = bStart;
   fb.duration = win;
-  double aStart = bStart + best.offset - pad;
+  double aStart = bStart + guess - pad;
   double aLead = 0.0;
   if (aStart < 0.0) aLead = -aStart, aStart = 0.0;
   fa.start = aStart;
@@ -243,12 +351,12 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
 
   res.timeB = 0.5 * (ovS + ovE);
   if (bSeg.size() < size_t(0.5 * opts.fineRate)) {
-    res.offset = best.offset;  // too little audio to refine; keep coarse
+    res.offset = guess;  // too little audio to refine; keep coarse
   } else {
     res.timeB = fb.start + 0.5 * double(bSeg.size()) / opts.fineRate;
     float corr = 0.0f;
     res.offset = refineOffset(aSeg, aStart, bSeg, fb.start, opts.fineRate,
-                              best.offset, opts.fineSearch, &corr);
+                              guess, opts.fineSearch, &corr);
     res.correlation = corr;
     res.polarityInverted = corr < 0.0f;
   }

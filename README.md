@@ -304,7 +304,7 @@ Why a separate helper instead of code inside Premiere? Adobe requires native in-
 ```
 engine/            C++ sync engine + helper (syncu-engine)
   src/             fft, audio (FFmpeg), sync, project (solver), api (JSON), server (HTTP), log
-  tests/           run_tests.py (synthetic shoots with known truth), bench_large.py
+  tests/           run_tests.py (synthetic shoots with known truth), bench_large.py, farm_eval.py
   third_party/     nlohmann/json, pocketfft
 plugin/            UXP panel (manifest, index.html, js/)
   tests/           plan.test.js (layout planner), sim/ (mock Premiere end-to-end)
@@ -329,6 +329,9 @@ node plugin/tests/plan.test.js
 
 # 161-clip / 1-hour benchmark
 SYNCU_ENGINE=engine/build/syncu-engine python3 engine/tests/bench_large.py /tmp/syncu-bench
+
+# Hard case: distant, quiet, windy, reverberant cameras plus unrelated B-roll
+SYNCU_ENGINE=engine/build/syncu-engine python3 engine/tests/farm_eval.py /tmp/syncu-farm
 ```
 
 Handy helper commands:

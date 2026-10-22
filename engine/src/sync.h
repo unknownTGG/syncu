@@ -27,7 +27,7 @@ struct MatchOptions {
   int coarseRate = 2000;      // Hz, for the whole-file search
   int fineRate = 48000;       // Hz, for sample-accurate refinement
   double fineWindow = 15.0;   // seconds of B used for refinement
-  double fineSearch = 0.004;  // +/- seconds searched around the coarse peak
+  double fineSearch = 0.03;  // +/- seconds searched around the coarse peak
   double minOverlap = 2.0;    // seconds; shorter overlaps are rejected
   int channelA = -1, channelB = -1;
   int maxCandidates = 5;
@@ -43,6 +43,7 @@ struct MatchResult {
   float confidence = 0.0f;   // 0..1
   float peakRatio = 0.0f;    // best / second-best coarse peak
   float correlation = 0.0f;  // normalized fine correlation at the peak (-1..1)
+  float agreement = 0.0f;    // share of windows across the overlap that agree
   bool polarityInverted = false;
   double overlap = 0.0;      // seconds of shared audio at this offset
   double timeB = 0.0;        // B time (s) where the refined offset was measured
@@ -116,6 +117,14 @@ struct DriftSegment {
 };
 
 // RMS envelope with one value per `hop` seconds (e.g. 0.05 -> 20 Hz).
+// Fraction (0..1) of short windows across the overlap [ovS, ovE] (B time)
+// whose local best lag agrees with `offset`; writes their median offset to
+// *refined, and the B time of the clearest agreeing window to *bestT (or
+// -1). Inputs are coarse-rate signals.
+double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
+                      int rate, double offset, double ovS, double ovE,
+                      double* refined, double* bestT = nullptr);
+
 std::vector<float> computeEnvelope(const std::vector<float>& x, int rate,
                                    double hop);
 

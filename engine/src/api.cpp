@@ -35,6 +35,7 @@ json matchToJson(const MatchResult& m) {
           {"confidence", m.confidence},
           {"peakRatio", m.peakRatio},
           {"correlation", m.correlation},
+          {"agreement", m.agreement},
           {"polarityInverted", m.polarityInverted},
           {"overlap", m.overlap},
           {"timeB", m.timeB},
