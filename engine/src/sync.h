@@ -117,8 +117,9 @@ struct DriftSegment {
 };
 
 // RMS envelope with one value per `hop` seconds (e.g. 0.05 -> 20 Hz).
-// Fraction (0..1) of short windows across the overlap [ovS, ovE] (B time)
-// whose local best lag agrees with `offset`; writes their median offset to
+// Evidence (-log10 chance probability) that short windows across the
+// overlap [ovS, ovE] (B time) agree on one lag near `offset`; writes their
+// median offset to
 // *refined, and the B time of the clearest agreeing window to *bestT (or
 // -1). Inputs are coarse-rate signals.
 double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,

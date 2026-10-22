@@ -151,17 +151,17 @@ double refineOffset(const std::vector<float>& aSegIn, double aStart,
 double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
                       int rate, double offset, double ovS, double ovE,
                       double* refined, double* bestT) {
+  // Returns -log10 of the chance that unrelated audio agrees this well.
   *refined = offset;
   if (bestT) *bestT = -1.0;
   const double ov = ovE - ovS;
   if (ov <= 0.0) return 0.0;
-  const double win = std::min(5.0, ov);
-  const int K = std::max(1, std::min(10, int(ov / win)));
+  const double win = std::min(4.0, ov);
+  const int K = std::max(1, std::min(24, int(ov / win)));
   const long long L = std::max<long long>(4, std::llround(0.02 * rate));
   const long long tol = std::max<long long>(1, std::llround(0.0015 * rate));
   const long long n = std::llround(win * rate);
-  int counted = 0;
-  struct Win { double lag, sharp, t; };
+  struct Win { double lag, sharp, t, ra, rb; };
   std::vector<Win> wins;
   for (int k = 0; k < K; ++k) {
     const double t = ovS + (K == 1 ? 0.0 : (ov - win) * k / (K - 1));
@@ -175,7 +175,6 @@ double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
     for (float v : bw) eb += double(v) * v;
     for (float v : aw) ea += double(v) * v;
     if (eb < 1e-14 * n || ea < 1e-14 * n) continue;  // digital silence here
-    ++counted;
     // Whitened (PHAT) like the whole-file search, so rumble can't dominate.
     removeDc(aw);
     removeDc(bw);
@@ -198,8 +197,25 @@ double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
     double rms = 0.0;
     for (long long j = 0; j <= 2 * L; ++j) rms += double(r[size_t(j + n - 1)]) * r[size_t(j + n - 1)];
     const double sharp = std::fabs(r[size_t(best + n - 1)]) / std::sqrt(rms / double(2 * L + 1) + 1e-30);
-    wins.push_back({lag, sharp, t});
+    wins.push_back({lag, sharp, t, std::sqrt(ea / double(aw.size())), std::sqrt(eb / double(n))});
   }
+  // Pauses between lines carry nothing to match and would look like
+  // disagreement: only count windows where both sides are reasonably
+  // active compared with their own busiest windows.
+  if (!wins.empty()) {
+    std::vector<double> va, vb;
+    for (const auto& w : wins) va.push_back(w.ra), vb.push_back(w.rb);
+    auto pct = [](std::vector<double> v) {
+      std::sort(v.begin(), v.end());
+      return v[size_t(0.8 * double(v.size() - 1))];
+    };
+    const double refA = pct(va), refB = pct(vb);
+    std::vector<Win> active;
+    for (const auto& w : wins)
+      if (w.ra >= 0.3 * refA && w.rb >= 0.3 * refB) active.push_back(w);
+    wins.swap(active);
+  }
+  const int counted = int(wins.size());
   // The windows may agree with each other on a lag a few ms from the
   // whole-file peak (which can sit on a strong echo): take the largest
   // cluster of agreeing windows, preferring the one nearest the peak.
@@ -225,13 +241,17 @@ double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
     std::nth_element(lags.begin(), lags.begin() + lags.size() / 2, lags.end());
     *refined = offset + lags[lags.size() / 2] / rate;
   }
-  // Real matches agree in most windows (60-100% even on distant, windy
-  // cameras); unrelated audio only forms a chance cluster of a few. So ask
-  // for at least three agreeing windows and about half of all of them; a
-  // short overlap with fewer windows can't fully vouch for a match.
-  if (counted == 0) return 0.0;
-  const double share = double(agreed) / counted;
-  return std::min(1.0, agreed / 3.0) * std::clamp((share - 0.2) / 0.3, 0.0, 1.0);
+  // How unlikely is a cluster this big by chance? An unrelated window's
+  // peak lands in a given +/-tol cell with p0; there are ~1/p0 cells.
+  if (counted == 0 || agreed < 2) return 0.0;
+  const double p0 = double(2 * tol + 1) / double(2 * L + 1);
+  double tail = 0.0;  // P(Binomial(counted, p0) >= agreed)
+  for (int k = agreed; k <= counted; ++k) {
+    double lc = std::lgamma(counted + 1.0) - std::lgamma(k + 1.0) - std::lgamma(counted - k + 1.0);
+    tail += std::exp(lc + k * std::log(p0) + (counted - k) * std::log1p(-p0));
+  }
+  const double pval = std::min(1.0, tail / p0);
+  return -std::log10(pval + 1e-300);
 }
 
 std::vector<float> computeEnvelope(const std::vector<float>& x, int rate,
@@ -289,13 +309,25 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
   // well above the noise floor (score), and real waveform similarity.
   const float cRatio = clamp01((res.peakRatio - 1.0f) / 1.2f);
   const float cScore = clamp01((best.score - 6.0f) / 14.0f);
-  float coarseConf = std::sqrt(cRatio * cScore);
+  const float peakConf = std::sqrt(cRatio * cScore);
+  float coarseConf = peakConf;
   // A real match lines up the same way all through the overlap; a chance
-  // peak doesn't. Check short windows across it independently.
+  // peak doesn't. Check short windows across it independently; that is
+  // the main evidence, the whole-file peak shape only adds to it.
   double guess = best.offset, bestT = -1.0;
-  if (coarseConf >= opts.refineMinCoarse) {
-    res.agreement = float(checkAgreement(a, b, opts.coarseRate, best.offset, ovS, ovE, &guess, &bestT));
-    coarseConf *= res.agreement;
+  if (peakConf >= 0.12f) {
+    const double eAgree = checkAgreement(a, b, opts.coarseRate, best.offset, ovS, ovE, &guess, &bestT);
+    // Evidence in powers of ten against "chance": from the windows, plus a
+    // whole-file peak standing far above any other offset (unrelated audio
+    // rarely gives more than 2-3x; real matches often give 5-20x).
+    const double eRatio = std::clamp(1.5 * std::log2(std::max(1.0f, res.peakRatio)) - 1.5, 0.0, 3.0);
+    res.agreement = float(std::clamp((eAgree - 2.0) / 3.0, 0.0, 1.0));
+    // Thousands of pairs get checked, so it takes 1e-2 to count at all and
+    // 1e-5 for full credit.
+    const float cEvidence = float(std::clamp((eAgree + eRatio - 2.0) / 3.0, 0.0, 1.0));
+    coarseConf = cEvidence * (0.6f + 0.4f * peakConf);
+  } else {
+    coarseConf = 0.0f;
   }
   if (coarseConf < opts.refineMinCoarse) {
     res.offset = best.offset;
@@ -362,7 +394,7 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
   }
 
   const float cCorr = clamp01(std::fabs(res.correlation) / 0.5f);
-  res.confidence = coarseConf * (0.6f + 0.4f * cCorr);
+  res.confidence = coarseConf * (0.75f + 0.25f * cCorr);
   res.found = res.confidence > 0.0f;
   return res;
 }

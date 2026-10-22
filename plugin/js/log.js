@@ -2,7 +2,7 @@
 // single "Copy report" gives the full picture (panel + helper).
 window.Syncu = window.Syncu || {};
 
-Syncu.VERSION = "0.1.7";
+Syncu.VERSION = "0.1.8";
 
 (() => {
   const lines = [];
@@ -122,6 +122,13 @@ Syncu.VERSION = "0.1.7";
       for (const e of r.edges.filter((e) => e.status === "used" || e.status === "manual" || e.status === "outlier"))
         out.push(`${e.status}\t${e.a}<-${e.b}\toffset ${e.match.offset.toFixed(6)}\tconf ${e.match.confidence.toFixed(2)}\tratio ${e.match.peakRatio.toFixed(2)}\tcorr ${e.match.correlation.toFixed(2)}\tagree ${(e.match.agreement || 0).toFixed(2)}\tresid ${(e.residual * 1000).toFixed(3)}ms`);
       out.push(`review-level pairs: ${r.edges.filter((e) => e.status === "review").length}, rejected pairs: ${r.edges.filter((e) => e.status === "rejected").length}`);
+      // Near misses explain why a clip didn't sync; keep the strongest few.
+      const near = r.edges.filter((e) => (e.status === "review" || e.status === "rejected") &&
+                                         (e.match.agreement > 0 || e.match.confidence >= 0.15))
+        .sort((x, y) => y.match.confidence - x.match.confidence).slice(0, 200);
+      if (near.length) out.push("-- strongest unused matches (up to 200) --");
+      for (const e of near)
+        out.push(`${e.status}\t${e.a}<-${e.b}\toffset ${e.match.offset.toFixed(6)}\tconf ${e.match.confidence.toFixed(2)}\tratio ${e.match.peakRatio.toFixed(2)}\tcorr ${e.match.correlation.toFixed(2)}\tagree ${(e.match.agreement || 0).toFixed(2)}\toverlap ${e.match.overlap.toFixed(1)}s`);
     }
     if (st.manualEdges && st.manualEdges.length) {
       sec("manual fixes");

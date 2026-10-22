@@ -671,6 +671,9 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
   for (size_t i = 0; i < clips.size(); ++i) {
     auto& r = out.clips[i];
     if (r.method != "none" || tclips[i].timestamp < 0) continue;
+    // Camera clocks are often wrong: a clip with usable audio that matched
+    // nothing stays unplaced rather than being guessed from its file time.
+    if (!nodes[nodeOf[i]].coarse.empty()) continue;
     // Prefer the component with the most clips from the same device.
     int bestComp = -1;
     size_t bestCount = 0;

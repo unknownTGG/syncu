@@ -51,6 +51,20 @@ def far_mic(x, delay_s, level_db, wind_db):
     return y + w + hiss
 
 
+def with_pauses(x):
+    """Real takes are lines separated by pauses and action: gate speech
+    into 3-12 s bursts with 2-10 s gaps of nothing but ambience."""
+    g = np.zeros(len(x))
+    t = int(rng.uniform(0, 3) * SR)
+    while t < len(x):
+        ln = int(rng.uniform(3, 12) * SR)
+        g[t: t + ln] = 1.0
+        t += ln + int(rng.uniform(2, 10) * SR)
+    ramp = np.hanning(int(0.1 * SR))
+    g = np.convolve(g, ramp / ramp.sum(), mode="same")
+    return x * g
+
+
 def write_aac(path, x):
     wav = path + ".wav"
     write_wav(wav, x)
@@ -62,7 +76,7 @@ def generate(d):
     clips, truth = [], {}
     for s in range(14):
         ln = rng.uniform(60, 180)
-        src = speechlike(ln + 20)
+        src = with_pauses(speechlike(ln + 20))
         rec = src[10 * SR: int((10 + ln) * SR)]
         rid = f"rec{s:02d}"
         write_wav(f"{d}/{rid}.wav", rec + rng.standard_normal(len(rec)) * 0.002)
@@ -80,7 +94,7 @@ def generate(d):
             clips.append({"id": cid, "path": f"{d}/{cid}.m4a", "device": cam, "isVideo": True})
             truth[cid] = {"scene": rid, "rel": max(a, 0) / SR - 10 - delay}
     for k in range(16):  # B-roll / other takes with no matching recording
-        x = far_mic(speechlike(rng.uniform(20, 90)), 0.01, rng.uniform(-58, -46), rng.uniform(-3, 6))
+        x = far_mic(with_pauses(speechlike(rng.uniform(20, 90))), 0.01, rng.uniform(-58, -46), rng.uniform(-3, 6))
         cid = f"broll{k:02d}"
         write_aac(f"{d}/{cid}.m4a", x)
         clips.append({"id": cid, "path": f"{d}/{cid}.m4a", "device": "fuji" if k % 2 else "sony", "isVideo": True})
