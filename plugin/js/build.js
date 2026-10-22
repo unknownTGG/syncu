@@ -71,15 +71,24 @@ Syncu.build = (() => {
       });
     }
 
-    // Not-synced clips: back to back per device (2 s apart), all devices
-    // starting together, positions relative to the area's start.
+    // Not-synced clips: one device after another (cameras first, then audio),
+    // back to back 2 s apart, so nothing overlaps and it's clear what's left.
+    // Positions are relative to the area's start.
     function unsyncedItems() {
-      const cursor = new Map();
-      const out = [];
+      const devices = [];
       for (const r of unsyncedRes) {
         const c = info.get(r.id);
-        const at = ceilFrame(cursor.get(c.device) || 0, frameTicks);
-        cursor.set(c.device, at + r.duration + 2);
+        if (!devices.includes(c.device)) devices.push(c.device);
+      }
+      const hasVideo = (d) => unsyncedRes.some((r) => info.get(r.id).device === d && info.get(r.id).isVideo);
+      const order = [...devices.filter(hasVideo), ...devices.filter((d) => !hasVideo(d))];
+      const sorted = order.flatMap((d) => unsyncedRes.filter((r) => info.get(r.id).device === d));
+      let cursor = 0;
+      const out = [];
+      for (const r of sorted) {
+        const c = info.get(r.id);
+        const at = ceilFrame(cursor, frameTicks);
+        cursor = at + r.duration + 2;
         out.push({
           id: r.id, clip: c, isVideo: c.isVideo, review: true, method: "none", unsynced: true,
           segs: [{ srcIn: 0, srcOut: r.duration, pos: at }], vpos: c.isVideo ? at : null,

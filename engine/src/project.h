@@ -41,6 +41,7 @@ struct AnalyzeOptions {
   double consistencyTolerance = 0.1; // seconds two match chains may disagree by
   double overlapTolerance = 1.0;     // seconds same-device clips may overlap
   double maxDrift = 500e-6;          // clock rate errors beyond this are rejected
+  bool useNameHints = true;       // scene numbers in file/folder names
   int threads = 0;                // 0 = hardware concurrency
   std::vector<ManualEdge> manualEdges;
 };

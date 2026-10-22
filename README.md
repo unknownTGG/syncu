@@ -145,7 +145,7 @@ If anything is uncertain, a **Review** section appears.
 
 - **Uncertain matches** show the clip pair, a confidence score, and a dropdown of candidate offsets. Pick the right one, optionally **nudge** it in milliseconds, tick **Use this match**, then click **Re-analyze with my fixes**.
 - **Placed by file time** means the clip had no usable audio, so it was positioned by its file timestamp. Check it on the timeline; it's marked there with a marker.
-- **Not synced** means no audio match was found, or the file couldn't be read. These clips still go on the timeline, in a **Not synced** area after the synced material with a marker, so nothing goes missing. In multicam and per-take modes they get their own *not synced* sequence. Place them by hand.
+- **Not synced** means no audio match was found, or the file couldn't be read. These clips still go on the timeline, in a **Not synced** area after the synced material with a marker, so nothing goes missing. They're laid out one device after another (each camera, then the audio recorders) so none of them overlap. In multicam and per-take modes they get their own *not synced* sequence. Place them by hand.
 
 ### 6. Build
 
@@ -180,6 +180,7 @@ Under **Output → Advanced**:
 | **Cut long recordings to fix clock drift** | Off | Off: every recorder file stays one clip, in perfect sync at its middle. The summary says how far its ends drift (e.g. 30 ppm over a 30-min take is ±27 ms at the ends). On: long files are cut at quiet moments so every piece stays within the drift tolerance. |
 | **Drift tolerance (ms)** | 2 | Only used when cutting. Smaller means more cuts. At 30 ppm, 2 ms means one cut every ~2 minutes. |
 | **Per-take mode: trim recorder audio to each take** | Off | Off: full-length recorder files in every take. On: trimmed to the take ±1 s. |
+| **Use scene numbers in file names as a hint** | On | Slate-style names ("04c t1.mov", "Scene 4c Take 1.wav", or a "Scene 04" folder) give the scene number. A matching scene number makes a match more likely to be accepted; different scene numbers make it much less likely. Names without a scene number (e.g. "C0001.MP4", "!BTS01.mov") aren't affected. Turn off if your names don't follow the shoot's scenes. |
 | **Auto-accept confidence** | 0.5 | Matches at or above this are used automatically. Matches between 0.15 and this value go to Review. Raise it if you see wrong matches; lower it if too much ends up in Review. Allowed range 0.05–0.99; anything else resets to 0.5, with a note in the log. |
 | **Search accuracy** | Normal | *Fast* / *Normal* / *High*: the sample rate of the first-pass search. *High* can help with very noisy or distant camera audio. Final accuracy is always sample-level either way. |
 
@@ -272,6 +273,7 @@ If the update fails, the bar shows why. You can always download the latest relea
 - **Video is never cut for drift.** If two long cameras drift against each other, the non-reference camera is aligned at its middle, and a note is logged.
 - **Camera audio with many separate mono channels** may use more audio tracks than planned. Tell us if tracks look shuffled.
 - **Mac builds are Apple Silicon only** for now.
+- **Premiere's own Synchronize isn't used:** plugins can't trigger Synchronize, Merge Clips or multicam creation (no UXP or ExtendScript API, and no way to run menu commands). Syncu does its own sub-frame audio matching instead, which is also more precise than Premiere's frame-based sync.
 - **Not on the Adobe marketplace:** the `.ccx` is installed directly from the GitHub release.
 
 ---

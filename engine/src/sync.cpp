@@ -99,7 +99,8 @@ std::vector<Candidate> coarseSearch(const std::vector<float>& a,
 
 double refineOffset(const std::vector<float>& aSegIn, double aStart,
                     const std::vector<float>& bSegIn, double bStart, int rate,
-                    double guess, double search, float* corr) {
+                    double guess, double search, float* corr,
+                    int farSide) {
   std::vector<float> a = aSegIn, b = bSegIn;
   removeDc(a);
   removeDc(b);
@@ -140,6 +141,23 @@ double refineOffset(const std::vector<float>& aSegIn, double aStart,
     double v = wAt(k);
     if (std::fabs(v) > std::fabs(bestW)) bestW = v, bestK = k;
   }
+  // Echoes reach the far mic after the direct sound, and a larger lag k
+  // means a later arrival in A: take the earliest local peak there that is
+  // nearly as tall as the highest one.
+  if (farSide != 0) {
+    const double thr = 0.6 * std::fabs(bestW);
+    auto isPeak = [&](long long k) {
+      const double v = std::fabs(wAt(k));
+      return v >= thr && v >= std::fabs(wAt(k - 1)) && v >= std::fabs(wAt(k + 1));
+    };
+    if (farSide > 0) {
+      for (long long k = k0 - s; k < bestK; ++k)
+        if (isPeak(k)) { bestK = k, bestW = wAt(k); break; }
+    } else {
+      for (long long k = k0 + s; k > bestK; --k)
+        if (isPeak(k)) { bestK = k, bestW = wAt(k); break; }
+    }
+  }
   const double bestV = norm(bestK);
   const double sign = bestW < 0 ? -1.0 : 1.0;
   double frac = parabolicPeak(sign * wAt(bestK - 1), sign * bestW,
@@ -150,16 +168,19 @@ double refineOffset(const std::vector<float>& aSegIn, double aStart,
 
 double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
                       int rate, double offset, double ovS, double ovE,
-                      double* refined, double* bestT) {
+                      double* refined, std::vector<double>* bestT) {
   // Returns -log10 of the chance that unrelated audio agrees this well.
   *refined = offset;
-  if (bestT) *bestT = -1.0;
+  if (bestT) bestT->clear();
   const double ov = ovE - ovS;
   if (ov <= 0.0) return 0.0;
   const double win = std::min(4.0, ov);
   const int K = std::max(1, std::min(24, int(ov / win)));
-  const long long L = std::max<long long>(4, std::llround(0.02 * rate));
-  const long long tol = std::max<long long>(1, std::llround(0.0015 * rate));
+  // Actors move relative to the cameras during a take, so the lag wanders
+  // by several ms: agree within +/-8 ms, searched over +/-100 ms (which
+  // keeps the chance of a stray agreement the same).
+  const long long L = std::max<long long>(8, std::llround(0.1 * rate));
+  const long long tol = std::max<long long>(1, std::llround(0.008 * rate));
   const long long n = std::llround(win * rate);
   struct Win { double lag, sharp, t, ra, rb; };
   std::vector<Win> wins;
@@ -227,16 +248,19 @@ double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
     if (c > agreed || (c == agreed && std::fabs(w.lag) < std::fabs(centre))) agreed = c, centre = w.lag;
   }
   std::vector<double> lags;
-  double bestPeak = 0.0;
+  std::vector<std::pair<double, double>> sharpT;  // (sharpness, window centre)
   for (const auto& w : wins) {
     if (std::fabs(w.lag - centre) > double(tol)) continue;
     lags.push_back(w.lag);
-    // Sharpest agreeing window = clearest shared sound (speech, not wind).
-    if (w.sharp > bestPeak) {
-      bestPeak = w.sharp;
-      if (bestT) *bestT = w.t;
-    }
+    sharpT.push_back({w.sharp, w.t + 0.5 * win});
   }
+  // The clearest agreeing windows = clearest shared sound (speech, not wind).
+  if (bestT) {
+    std::sort(sharpT.rbegin(), sharpT.rend());
+    for (size_t k = 0; k < sharpT.size() && k < 3; ++k) bestT->push_back(sharpT[k].second);
+  }
+  // The median of the agreeing windows: as actors move the lag wanders, and
+  // this follows the middle of it rather than one moment (or one echo).
   if (!lags.empty()) {
     std::nth_element(lags.begin(), lags.begin() + lags.size() / 2, lags.end());
     *refined = offset + lags[lags.size() / 2] / rate;
@@ -314,7 +338,8 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
   // A real match lines up the same way all through the overlap; a chance
   // peak doesn't. Check short windows across it independently; that is
   // the main evidence, the whole-file peak shape only adds to it.
-  double guess = best.offset, bestT = -1.0;
+  double guess = best.offset;
+  std::vector<double> bestT;
   if (peakConf >= 0.12f) {
     const double eAgree = checkAgreement(a, b, opts.coarseRate, best.offset, ovS, ovE, &guess, &bestT);
     // Evidence in powers of ten against "chance": from the windows, plus a
@@ -324,7 +349,7 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
     res.agreement = float(std::clamp((eAgree - 2.0) / 3.0, 0.0, 1.0));
     // Thousands of pairs get checked, so it takes 1e-2 to count at all and
     // 1e-5 for full credit.
-    const float cEvidence = float(std::clamp((eAgree + eRatio - 2.0) / 3.0, 0.0, 1.0));
+    const float cEvidence = float(std::clamp((eAgree + eRatio + opts.priorEvidence - 2.0) / 3.0, 0.0, 1.0));
     coarseConf = cEvidence * (0.6f + 0.4f * peakConf);
   } else {
     coarseConf = 0.0f;
@@ -352,45 +377,81 @@ MatchResult matchDecoded(const std::string& pathA, const std::string& pathB,
     if (i + wHops < env.size()) run += env[i + wHops] * env[i + wHops];
     run -= env[i] * env[i];
   }
-  double bStart = std::max(ovS, double(bestI) * hop);
-  // Prefer the stretch where the agreement check locked most clearly: on a
-  // distant, windy camera the loudest stretch is often just wind.
-  if (bestT >= 0.0) bStart = std::clamp(bestT + 2.5 - 0.5 * win, ovS, std::max(ovS, ovE - win));
+  // Refine on the stretches where the agreement check locked most clearly
+  // (on a distant, windy camera the loudest stretch is often just wind),
+  // and take the median, so one stretch dominated by an echo can't win.
+  // Several shorter stretches cost about the same decoding as one long one.
+  const double fwin = bestT.size() > 1 ? std::min(8.0, win) : win;
+  std::vector<double> starts;
+  for (double t : bestT) starts.push_back(std::clamp(t - 0.5 * fwin, ovS, std::max(ovS, ovE - fwin)));
+  if (starts.empty()) starts.push_back(std::max(ovS, double(bestI) * hop));
 
   const double pad = opts.fineSearch + 0.002;
-  DecodeOptions fa, fb;
-  fa.sampleRate = fb.sampleRate = opts.fineRate;
-  fa.channel = opts.channelA;
-  fb.channel = opts.channelB;
-  fb.start = bStart;
-  fb.duration = win;
-  double aStart = bStart + guess - pad;
-  double aLead = 0.0;
-  if (aStart < 0.0) aLead = -aStart, aStart = 0.0;
-  fa.start = aStart;
-  fa.duration = win + 2 * pad - aLead;
-  std::vector<float> aSeg = decodeAudio(pathA, fa);
-  std::vector<float> bSeg = decodeAudio(pathB, fb);
-  // Edge case: overlap at the very start/end of A; trim B to fit inside A.
-  const long long lead = std::llround(aLead * opts.fineRate);
-  if (lead > 0) {
-    bSeg.erase(bSeg.begin(), bSeg.begin() + std::min<long long>(lead, (long long)bSeg.size()));
-    fb.start += double(lead) / opts.fineRate;
+  struct Fine { double offset, timeB; float corr; };
+  // Refine around one starting guess on every chosen stretch.
+  auto refineAround = [&](double g) {
+    std::vector<Fine> fines;
+    for (double bStart : starts) {
+      DecodeOptions fa, fb;
+      fa.sampleRate = fb.sampleRate = opts.fineRate;
+      fa.channel = opts.channelA;
+      fb.channel = opts.channelB;
+      fb.start = bStart;
+      fb.duration = fwin;
+      double aStart = bStart + g - pad;
+      double aLead = 0.0;
+      if (aStart < 0.0) aLead = -aStart, aStart = 0.0;
+      fa.start = aStart;
+      fa.duration = fwin + 2 * pad - aLead;
+      std::vector<float> aSeg = decodeAudio(pathA, fa);
+      std::vector<float> bSeg = decodeAudio(pathB, fb);
+      // Edge case: overlap at the very start/end of A; trim B to fit inside A.
+      const long long lead = std::llround(aLead * opts.fineRate);
+      if (lead > 0) {
+        bSeg.erase(bSeg.begin(), bSeg.begin() + std::min<long long>(lead, (long long)bSeg.size()));
+        fb.start += double(lead) / opts.fineRate;
+      }
+      const size_t maxB = aSeg.size() > size_t(2 * pad * opts.fineRate)
+                              ? aSeg.size() - size_t(2 * pad * opts.fineRate) : 0;
+      if (bSeg.size() > maxB) bSeg.resize(maxB);
+      if (bSeg.size() < size_t(0.5 * opts.fineRate)) continue;  // too little to refine
+      float corr = 0.0f;
+      const double off = refineOffset(aSeg, aStart, bSeg, fb.start, opts.fineRate, g, opts.fineSearch, &corr, opts.farSide);
+      fines.push_back({off, fb.start + 0.5 * double(bSeg.size()) / opts.fineRate, corr});
+    }
+    return fines;
+  };
+  auto strength = [](const std::vector<Fine>& f) {
+    double s = 0.0;
+    for (const auto& x : f) s += std::fabs(x.corr);
+    return f.empty() ? -1.0 : s / double(f.size());
+  };
+  // The whole-file peak and the windows' consensus can disagree when one
+  // of them sits on a strong echo; the direct sound matches the waveform
+  // better than its echo, so refine around both and keep the stronger.
+  std::vector<Fine> fines = refineAround(guess);
+  if (std::fabs(guess - best.offset) > 0.0015) {
+    std::vector<Fine> alt = refineAround(best.offset);
+    // offset = tA - tB: a sound arriving later in A gives a larger offset.
+    const bool echoRange = std::fabs(guess - best.offset) < 0.06;
+    bool takeAlt;
+    if (echoRange && opts.farSide != 0 && !alt.empty() && !fines.empty())
+      takeAlt = opts.farSide > 0 ? best.offset < guess : best.offset > guess;
+    else
+      takeAlt = strength(alt) > strength(fines);
+    if (takeAlt) fines.swap(alt);
   }
-  const size_t maxB = aSeg.size() > size_t(2 * pad * opts.fineRate)
-                          ? aSeg.size() - size_t(2 * pad * opts.fineRate) : 0;
-  if (bSeg.size() > maxB) bSeg.resize(maxB);
 
   res.timeB = 0.5 * (ovS + ovE);
-  if (bSeg.size() < size_t(0.5 * opts.fineRate)) {
+  if (fines.empty()) {
     res.offset = guess;  // too little audio to refine; keep coarse
   } else {
-    res.timeB = fb.start + 0.5 * double(bSeg.size()) / opts.fineRate;
-    float corr = 0.0f;
-    res.offset = refineOffset(aSeg, aStart, bSeg, fb.start, opts.fineRate,
-                              guess, opts.fineSearch, &corr);
-    res.correlation = corr;
-    res.polarityInverted = corr < 0.0f;
+    std::sort(fines.begin(), fines.end(), [](const Fine& x, const Fine& y) { return x.offset < y.offset; });
+    const Fine& m = fines[fines.size() / 2];
+    res.offset = m.offset;
+    res.timeB = m.timeB;
+    res.correlation = m.corr;
+    res.polarityInverted = m.corr < 0.0f;
   }
 
   const float cCorr = clamp01(std::fabs(res.correlation) / 0.5f);

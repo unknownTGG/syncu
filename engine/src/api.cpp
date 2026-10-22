@@ -62,6 +62,7 @@ std::string analyzeJson(const std::string& request, const ProgressFn& progress) 
       get(o, "consistencyTolerance", opts.consistencyTolerance);
       get(o, "overlapTolerance", opts.overlapTolerance);
       get(o, "maxDrift", opts.maxDrift);
+      get(o, "useNameHints", opts.useNameHints);
       get(o, "threads", opts.threads);
     }
     for (const auto& m : req.value("manualEdges", json::array()))

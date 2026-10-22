@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <regex>
 #include <thread>
 
 #include "audio.h"
@@ -113,6 +114,38 @@ double fileStartTime(const std::string& path, double duration) {
 #endif
 #endif
   return mtime - std::max(0.0, duration);
+}
+
+}  // namespace
+
+namespace {
+
+// Scene number from a slate-style name ("04c t1", "Scene 4c Take 1",
+// "Sc12_tk2"), or from the nearest "Scene 04" folder; -1 when there is
+// none (e.g. "C0001.MP4", "!BTS01.mov").
+int sceneNumber(const std::string& path) {
+  static const std::regex scene(R"(^\s*(?:scene|sc)\s*[-_ ]?\s*0*(\d{1,3})(?!\d))", std::regex::icase);
+  static const std::regex slate(R"(^\s*0*(\d{1,3})[a-z]{0,2}\d?\s*[-_ ]?\s*(?:t|tk|take)\s*\d)", std::regex::icase);
+  std::vector<std::string> parts;
+  std::string cur;
+  for (char ch : path) {
+    if (ch == '/' || ch == '\\') {
+      if (!cur.empty()) parts.push_back(cur);
+      cur.clear();
+    } else {
+      cur += ch;
+    }
+  }
+  if (!cur.empty()) parts.push_back(cur);
+  if (parts.empty()) return -1;
+  std::string stem = parts.back();
+  const size_t dot = stem.find_last_of('.');
+  if (dot != std::string::npos && dot > 0) stem = stem.substr(0, dot);
+  std::smatch m;
+  if (std::regex_search(stem, m, scene) || std::regex_search(stem, m, slate)) return std::stoi(m[1]);
+  for (int k = int(parts.size()) - 2; k >= 0 && k >= int(parts.size()) - 4; --k)
+    if (std::regex_search(parts[k], m, scene)) return std::stoi(m[1]);
+  return -1;
 }
 
 }  // namespace
@@ -286,6 +319,15 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
   MatchOptions mo = opts.match;
   mo.refineMinCoarse = std::max(mo.refineMinCoarse, opts.reviewConfidence);
 
+  // Scene numbers from the names (the original path, not a proxy's).
+  std::vector<int> scene(nodes.size(), -1);
+  if (opts.useNameHints) {
+    int known = 0;
+    for (size_t n = 0; n < nodes.size(); ++n)
+      if (nodes[n].lead != SIZE_MAX) known += (scene[n] = sceneNumber(clipsIn[nodes[n].lead].path)) >= 0;
+    logInfo("scene numbers found in " + std::to_string(known) + " of " + std::to_string(nodes.size()) + " file names");
+  }
+
   std::vector<EdgeResult> edges(pairs.size());
   std::vector<std::pair<int, int>> edgeNodes(pairs.size());
   std::atomic<size_t> matched{0};
@@ -298,9 +340,18 @@ AnalyzeResult analyzeProject(const std::vector<ClipInfo>& clipsIn,
     e.a = clips[nodes[A].lead].id;
     e.b = clips[nodes[B].lead].id;
     edgeNodes[i] = {A, B};
+    MatchOptions pmo = mo;
+    // Cameras are usually farther from the speaker than a recorder's mic.
+    if (nodes[A].isVideo != nodes[B].isVideo) pmo.farSide = nodes[A].isVideo ? 1 : -1;
+    if (opts.useNameHints) {
+      // Same scene number in both names: a little more evidence for a match.
+      // Different scene numbers: strong evidence against it.
+      const int sa = scene[A], sb = scene[B];
+      if (sa >= 0 && sb >= 0) pmo.priorEvidence = sa == sb ? 1.5 : -3.0;
+    }
     try {
       e.match = matchDecoded(clips[nodes[A].lead].path, clips[nodes[B].lead].path,
-                             nodes[A].coarse, nodes[B].coarse, mo,
+                             nodes[A].coarse, nodes[B].coarse, pmo,
                              nodes[A].spec.get());
     } catch (const std::exception& ex) {
       logError("match " + e.a + " / " + e.b + " failed: " + ex.what());

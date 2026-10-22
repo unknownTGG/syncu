@@ -132,6 +132,25 @@ check("unsynced/timeline: area marked", tl.sequences[0].markers.some((m) => m.na
 check("unsynced/timeline: not reported as dropped", tl.unplaced.length === 0 && tl.unsynced.includes("X"));
 const mcu = build.planBuild(clips, withUnsynced, { mode: "multicam", frameTicks: FT });
 check("unsynced/multicam: separate 'not synced' sequence", mcu.sequences.some((s) => s.name.endsWith("not synced") && s.placements.some((p) => p.clipId === "X")));
+// Several unsynced clips from three devices: one device after another,
+// cameras before audio, never overlapping.
+{
+  const un = (id, duration) => ({ id, method: "none", component: -1, driftPpm: 0, segments: [], duration, needsReview: true });
+  const many = build.planBuild(clips, { components: 0, clips: [un("S2R", 40), un("B1", 20), un("X", 30), un("B2", 25), un("R", 50)] },
+                               { mode: "timeline", frameTicks: FT });
+  const ps = many.sequences[0].placements.filter((p) => p.kind === "av" || p.kind === "audio");
+  const span = new Map();
+  for (const p of ps) {
+    const len = p.srcOut - p.srcIn;
+    const s = span.get(p.clipId) || [Infinity, -Infinity];
+    span.set(p.clipId, [Math.min(s[0], p.pos), Math.max(s[1], p.pos + len)]);
+  }
+  const iv = [...span.entries()].sort((a, b) => a[1][0] - b[1][0]);
+  const overlap = iv.some((x, i) => i && x[1][0] < iv[i - 1][1][1] - 1e-6);
+  check("unsynced: no two clips overlap in time", !overlap, iv.map((x) => `${x[0]}@${x[1][0].toFixed(1)}`).join(" "));
+  const order = iv.map((x) => x[0]).join(",");
+  check("unsynced: cameras one after another, then audio", order === "B1,B2,X,S2R,R", order);
+}
 const nothing = build.planBuild(clips, { components: 0, clips: [{ id: "X", method: "none", component: -1, driftPpm: 0, segments: [], duration: 30 }] }, { mode: "timeline", frameTicks: FT });
 check("unsynced: builds even when nothing synced", nothing.sequences.length === 1 && nothing.sequences[0].placements.length === 1);
 

@@ -105,6 +105,7 @@ window.Syncu = window.Syncu || {};
       muteScratch: !!$("muteScratch").checked,
       driftCuts: !!$("driftCuts").checked,
       trimTakes: !!$("trimTakes").checked,
+      nameHints: !!$("nameHints").checked,
       driftTolMs: numberField("driftTol", 2, 0.25, 50),
       autoConf: numberField("autoConf", 0.5, 0.05, 0.99),
       coarseRate: Number(radio("accuracy", "2000")) || 2000,
@@ -240,6 +241,7 @@ window.Syncu = window.Syncu || {};
         // at its middle (a huge tolerance means "never cut").
         driftTolerance: st.driftCuts ? st.driftTolMs / 1000 : 1e6,
         coarseRate: st.coarseRate,
+        useNameHints: st.nameHints,
       },
       manualEdges: state.manualEdges,
     };

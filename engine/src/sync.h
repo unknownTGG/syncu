@@ -34,6 +34,14 @@ struct MatchOptions {
   // Skip the (costly, decode-heavy) fine step when the coarse match alone
   // already scores below this; such pairs are rejected anyway.
   float refineMinCoarse = 0.08f;
+  // Extra evidence (powers of ten) for or against this pair from outside
+  // the audio, e.g. matching scene numbers in the file names.
+  double priorEvidence = 0.0;
+  // Which file was recorded farther from the sound: +1 = A (e.g. a camera
+  // against a lav recorder), -1 = B, 0 = unknown. Echoes reach the far mic
+  // late, so between two nearby candidate offsets the earlier arrival there
+  // is the direct sound.
+  int farSide = 0;
 };
 
 struct MatchResult {
@@ -61,10 +69,13 @@ void removeDc(std::vector<float>& x);
 
 // Refine around `guess`, given decoded segments: `aSeg` starts at aStart
 // seconds in A, `bSeg` starts at bStart seconds in B. Returns the refined
-// offset; writes the normalized correlation (signed) to *corr.
+// offset; writes the normalized correlation (signed) to *corr. With farSide
+// (see MatchOptions) it takes the earliest arrival at the far mic among the
+// peaks nearly as tall as the highest, as later ones are echoes.
 double refineOffset(const std::vector<float>& aSeg, double aStart,
                     const std::vector<float>& bSeg, double bStart, int rate,
-                    double guess, double search, float* corr);
+                    double guess, double search, float* corr,
+                    int farSide = 0);
 
 // Full file-to-file match: coarse search over both whole files, then
 // sample-accurate refinement of the best candidate.
@@ -120,11 +131,11 @@ struct DriftSegment {
 // Evidence (-log10 chance probability) that short windows across the
 // overlap [ovS, ovE] (B time) agree on one lag near `offset`; writes their
 // median offset to
-// *refined, and the B time of the clearest agreeing window to *bestT (or
-// -1). Inputs are coarse-rate signals.
+// *refined, and the B times (window centres) of up to three of the clearest
+// agreeing windows to *bestT. Inputs are coarse-rate signals.
 double checkAgreement(const std::vector<float>& a, const std::vector<float>& b,
                       int rate, double offset, double ovS, double ovE,
-                      double* refined, double* bestT = nullptr);
+                      double* refined, std::vector<double>* bestT = nullptr);
 
 std::vector<float> computeEnvelope(const std::vector<float>& x, int rate,
                                    double hop);
