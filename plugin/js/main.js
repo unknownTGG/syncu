@@ -396,14 +396,9 @@ window.Syncu = window.Syncu || {};
     for (const w of plan.warnings) Syncu.log("warn", w);
     Syncu.log(`plan: ${plan.sequences.length} sequence(s), ${plan.sequences.reduce((n, s) => n + s.placements.length, 0)} placement(s), ${plan.unplaced.length} unplaced`);
     setProgress(0, "Building");
-    try {
-      await Syncu.build.executePlan(plan, state.clips, (f, m) => setProgress(f, m), makePlan);
-    } catch (e) {
-      if (!Syncu.pp.isStale(e)) throw e;
-      // Premiere dropped an object mid-build; start over with fresh ones.
-      Syncu.log("warn", "Premiere invalidated an object during the build; retrying once with fresh objects");
-      await Syncu.build.executePlan(makePlan(10594584000), state.clips, (f, m) => setProgress(f, m), makePlan);
-    }
+    // Invalidated Premiere objects are recovered step by step inside the
+    // build; never start it over (that left extra half-built sequences).
+    await Syncu.build.executePlan(plan, state.clips, (f, m) => setProgress(f, m), makePlan);
     $("summary").insertAdjacentHTML("beforeend", `<div class="row ok"><div class="title">✓ Built ${ctx.lastPlan.sequences.length} sequence(s)</div><div class="meta">Look for the new “Syncu …” bin in the Project panel.</div></div>`);
     $("resultsSub").textContent = "Built";
   }

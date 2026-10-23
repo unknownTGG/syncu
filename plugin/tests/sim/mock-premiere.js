@@ -48,6 +48,40 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
   };
   const action = (label, fn) => ({ __action: true, label, run: fn });
 
+  // ---- script-object handles ----
+  // Real Premiere sometimes invalidates the objects a plugin holds ("The
+  // script object is no longer valid"). The panel only ever gets handles
+  // (proxies); every `invalidateEvery` transactions all handles go stale
+  // and any use of an old one throws, like in real Premiere.
+  let gen = 0;
+  let invalidateEvery = 0;
+  let txCount = 0;
+  const handleInfo = new WeakMap(); // proxy -> { target, gen }
+  const handleCache = new WeakMap(); // target -> { gen, proxy }
+  const STALE = "The script object is no longer valid.";
+  function handle(target) {
+    if (!target || typeof target !== "object" || handleInfo.has(target)) return target;
+    const c = handleCache.get(target);
+    if (c && c.gen === gen) return c.proxy;
+    const myGen = gen;
+    const proxy = new Proxy(target, {
+      get(t, prop) {
+        if (myGen !== gen) throw new Error(STALE);
+        const v = t[prop];
+        return typeof v === "function" ? v.bind(proxy) : v;
+      },
+    });
+    handleInfo.set(proxy, { target, gen: myGen });
+    handleCache.set(target, { gen: myGen, proxy });
+    return proxy;
+  }
+  function unwrap(x) {
+    const i = x && handleInfo.get(x);
+    if (!i) return x;
+    if (i.gen !== gen) throw new Error(STALE);
+    return i.target;
+  }
+
   // ---- project items ----
   let nextId = 1;
   class ProjectItem {
@@ -91,7 +125,7 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
       this.children = [];
     }
     async getItems() {
-      return this.children.slice();
+      return this.children.map(handle);
     }
     createBinAction(name, makeUnique) {
       assertLocked("createBinAction");
@@ -125,7 +159,7 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
       return TickTime.createWithSeconds(this.outPt);
     }
     async getProjectItem() {
-      return this.clip;
+      return handle(this.clip);
     }
     async getName() {
       return this.clip.name;
@@ -181,6 +215,8 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
       this.markers = [];
       this.projectItem = new ProjectItem("sequence", name);
       this.projectItem.sequence = this;
+      const gid = `seq-${this.projectItem._id}`;
+      this.guid = { toString: () => gid };
     }
     async getVideoTrackCount() {
       return this.video.length;
@@ -198,7 +234,7 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
       return String(this.frameTicks);
     }
     async getProjectItem() {
-      return this.projectItem;
+      return handle(this.projectItem);
     }
     async getEndTime() {
       let e = 0;
@@ -270,30 +306,44 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
       } });
       for (const a of actions) a.run();
       actionLog.push(`${label} (${actions.length})`);
+      if (invalidateEvery && ++txCount % invalidateEvery === 0) gen++;
       return true;
     },
     async getRootItem() {
-      return root;
+      return handle(root);
     },
     async getActiveSequence() {
-      return active;
+      return handle(active);
+    },
+    async getSequences() {
+      return sequences.map(handle);
+    },
+    async getSequence(guid) {
+      const id = String(guid);
+      return handle(sequences.find((x) => x.guid.toString() === id) || null);
     },
     async createSequenceFromMedia(name, clips, bin) {
       if (!clips || !clips[0]) throw new Error("createSequenceFromMedia: no clip");
+      bin = unwrap(bin);
       const seq = new Sequence(name, frameTicks);
-      const c = clips[0];
+      const c = unwrap(clips[0]);
       if (c.hasVideo) seq.put("video", 0, c, 0, 0, c.duration);
       if (c.hasAudio) seq.put("audio", 0, c, 0, 0, c.duration);
       sequences.push(seq);
       (bin || root).children.push(seq.projectItem);
       active = seq;
-      return seq;
+      return handle(seq);
     },
   };
 
-  const editorFor = (seq) => ({
+  const editorFor = (seqH) => ({
+    get seq() {
+      return unwrap(seqH);
+    },
     createOverwriteItemAction(pi, t, vIdx, aIdx) {
       assertLocked("createOverwriteItemAction");
+      const seq = this.seq;
+      pi = unwrap(pi);
       if (!(t instanceof TickTime)) throw new TypeError("time must be a TickTime");
       return action("overwrite", () => {
         if (pi.sequence) {
@@ -308,6 +358,8 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
     },
     createInsertProjectItemAction(pi, t, vIdx, aIdx, limitShift) {
       assertLocked("createInsertProjectItemAction");
+      const seq = this.seq;
+      pi = unwrap(pi);
       return action("insert", () => {
         // Ripple everything at/after t on all tracks, then place.
         for (const tr of [...seq.video, ...seq.audio]) for (const it of tr.items) if (it.start >= t.seconds) it.start += pi.duration;
@@ -317,6 +369,7 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
     },
     createCloneTrackItemAction(item, offset, vOff, aOff, alignToVideo, isInsert) {
       assertLocked("createCloneTrackItemAction");
+      const seq = this.seq;
       return action("clone", () => {
         const list = item.kind === "video" ? seq.video : seq.audio;
         const target = item.trackIndex + (item.kind === "video" ? vOff : aOff);
@@ -326,6 +379,7 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
     },
     createRemoveItemsAction(sel, ripple, mediaType, shift) {
       assertLocked("createRemoveItemsAction");
+      const seq = this.seq;
       if (!sel.__valid) throw new Error("TrackItemSelection used outside its createEmptySelection callback");
       const items = sel.items.slice();
       return action("remove", () => {
@@ -337,8 +391,9 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
   const ppro = {
     TickTime,
     Constants: { TrackItemType: { EMPTY: 0, CLIP: 1, TRANSITION: 2 }, MediaType: { ANY: "any", VIDEO: "video", AUDIO: "audio" } },
-    Project: { getActiveProject: async () => project },
-    ProjectUtils: { getSelection: async () => ({ getItems: async () => selection.slice() }) },
+    Project: { getActiveProject: async () => handle(project) },
+    ProjectUtils: { getSelection: async () => ({ getItems: async () => selection.map(handle) }) },
+    Guid: { fromString: (str) => ({ toString: () => String(str) }) },
     FolderItem: { cast: (i) => (i && i.kind === "bin" ? i : null) },
     ClipProjectItem: { cast: (i) => (i && i.kind === "clip" ? i : null) },
     SequenceEditor: { getEditor: (seq) => editorFor(seq) },
@@ -354,13 +409,16 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
       },
     },
     Markers: {
-      getMarkers: async (seq) => ({
+      getMarkers: async (seqH) => {
+        const seq = unwrap(seqH);
+        return {
         createAddMarkerAction(name, type, start, dur, comment) {
           assertLocked("createAddMarkerAction");
           return action("marker", () => seq.markers.push({ name, time: start.seconds, comment }));
         },
         getMarkers: () => seq.markers.slice(),
-      }),
+      };
+      },
     },
   };
 
@@ -369,6 +427,11 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
     setSelection: (items) => (selection = items),
     bins,
     setActive: (s) => (active = s),
+    setInvalidateEvery: (n) => {
+      invalidateEvery = n;
+      txCount = 0;
+    },
+    staleGenerations: () => gen,
   };
 }
 

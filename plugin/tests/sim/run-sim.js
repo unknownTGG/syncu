@@ -141,6 +141,22 @@ async function main() {
     for (const seq of made) verifySequence(mode, seq, false);
   }
 
+  // ---- Premiere invalidating objects mid-build (seen on real 26.5) ----
+  for (const every of [5, 2]) {
+    mock.setInvalidateEvery(every);
+    const g0 = mock.staleGenerations();
+    const before = mock.sequences.length;
+    w.document.querySelector('input[name="output"][value="timeline"]').checked = true;
+    await click("buildBtn", () => !busy("buildBtn"));
+    mock.setInvalidateEvery(0);
+    const made = mock.sequences.slice(before);
+    const err = [...$("summary").querySelectorAll(".row.err:not(.media)")].map((r) => r.textContent.trim()).join(" | ");
+    const stale = mock.staleGenerations() - g0;
+    check(`stale objects every ${every} edits: built without errors`, !err && made.length === 1, err || `${made.length} sequence(s), ${stale} invalidation(s)`);
+    check(`stale objects every ${every} edits: really invalidated and recovered`, stale >= 2 && /recovered from \d+ invalidated/.test(w.Syncu.log.lines().join("\n")), `${stale} invalidation(s)`);
+    for (const seq of made) verifySequence(`stale${every}`, seq, false);
+  }
+
   // ---- Opt-in drift cuts: re-analyze and build a synced timeline ----
   $("driftCuts").checked = true;
   await click("analyzeBtn", () => !busy("analyzeBtn"));

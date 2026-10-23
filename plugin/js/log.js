@@ -2,7 +2,7 @@
 // single "Copy report" gives the full picture (panel + helper).
 window.Syncu = window.Syncu || {};
 
-Syncu.VERSION = "0.1.10";
+Syncu.VERSION = "0.1.11";
 
 (() => {
   const lines = [];

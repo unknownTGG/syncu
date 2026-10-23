@@ -62,14 +62,84 @@ Syncu.pp = (() => {
 
   // Many edits in one action have crashed Premiere; send them in small
   // batches, saving the log and letting Premiere settle before each one.
-  async function transactInBatches(proj, label, items, makeAction, size = 15) {
+  // `proj` may be a function returning the current project; `step` wraps
+  // each batch (a build context retries it with fresh objects).
+  async function transactInBatches(proj, label, items, makeAction, size = 15, step = (l, f) => f()) {
     for (let i = 0; i < items.length; i += size) {
       const part = items.slice(i, i + size);
-      log(`${label}: ${i + 1}-${i + part.length} of ${items.length}`);
+      const name = `${label} (${i + 1}-${i + part.length} of ${items.length})`;
+      log(name);
       await Syncu.log.flush();
-      transact(proj, `${label} (${i + 1}-${i + part.length})`, () => part.map(makeAction));
+      await step(name, async () => transact(typeof proj === "function" ? proj() : proj, name, () => part.map(makeAction)));
       await sleep(40);
     }
+  }
+
+  // Premiere sometimes invalidates the objects a plugin holds ("The script
+  // object is no longer valid") in the middle of a build. A build context
+  // keeps the current project, sequence and clips, and re-fetches them when
+  // that happens so the failed step can simply run again.
+  function buildContext(clips) {
+    const ctx = { proj: null, seq: null, seqId: null, seqName: null, refreshes: 0 };
+    ctx.refresh = async () => {
+      ctx.refreshes++;
+      ctx.proj = await project();
+      await refreshItems(clips); // clips' projectItem fields are replaced in place
+      if (ctx.binName) {
+        ctx.bin = null;
+        try {
+          for (const it of await (await ctx.proj.getRootItem()).getItems()) if (itemName(it) === ctx.binName) ctx.bin = it;
+        } catch (e) {
+          ctx.bin = null; // sequences go to the project root
+        }
+      }
+      if (ctx.seqId || ctx.seqName) {
+        let seq = null;
+        try {
+          if (ctx.seqId) seq = await ctx.proj.getSequence(ppro.Guid.fromString(ctx.seqId));
+        } catch (e) {
+          seq = null;
+        }
+        if (!seq) {
+          for (const s of await ctx.proj.getSequences()) {
+            try {
+              if (s.name === ctx.seqName) seq = s;
+            } catch (e) {
+              /* skip */
+            }
+          }
+        }
+        if (!seq) throw new Error(`lost the sequence "${ctx.seqName}" while building`);
+        ctx.seq = seq;
+      }
+    };
+    ctx.setSequence = (seq) => {
+      ctx.seq = seq;
+      try {
+        ctx.seqName = seq.name;
+      } catch (e) {
+        /* keep the old name */
+      }
+      try {
+        ctx.seqId = seq.guid ? seq.guid.toString() : null;
+      } catch (e) {
+        ctx.seqId = null;
+      }
+    };
+    // Run fn; if Premiere invalidated something, refresh and run it again.
+    ctx.step = async (label, fn, tries = 3) => {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          return await fn();
+        } catch (e) {
+          if (!isStale(e) || attempt >= tries) throw e;
+          log("warn", `${label}: Premiere invalidated an object; refreshing and retrying (${attempt}/${tries - 1})`);
+          await sleep(150 * attempt);
+          await ctx.refresh();
+        }
+      }
+    };
+    return ctx;
   }
 
   function itemName(item) {
@@ -315,33 +385,44 @@ Syncu.pp = (() => {
   // Make sure the sequence has at least nV video and nA audio tracks.
   // Premiere creates a track when an insert targets index == track count, so
   // add them one at a time with a throwaway clip, then clear everything.
-  async function ensureTracks(proj, seq, nV, nA, videoItem, audioItem) {
+  // Each added track is its own retryable step (see placeAudioExact's `c`).
+  async function ensureTracks(proj, seq, nV, nA, videoItem, audioItem, c) {
+    c = c || { proj, seq, step: (l, f) => f() };
+    const S = c.step, P = () => c.proj, Q = () => c.seq;
+    const vItem = () => (typeof videoItem === "function" ? videoItem() : videoItem);
+    const aItem = () => (typeof audioItem === "function" ? audioItem() : audioItem) || vItem();
     for (let guard = 0; guard < 200; guard++) {
-      const c = await trackCounts(seq);
-      if (c.v >= nV && c.a >= nA) break;
-      if (c.v < nV) transact(proj, "Syncu: add video track", () => [insertAction(seq, videoItem, 0, c.v, c.a)]);
-      else transact(proj, "Syncu: add audio track", () => [insertAction(seq, audioItem || videoItem, 0, c.v, c.a)]);
-      const n = await trackCounts(seq);
-      if (n.v === c.v && n.a === c.a) {
-        log("warn", `could not add tracks (stuck at V${c.v}/A${c.a}, wanted V${nV}/A${nA})`);
-        break;
-      }
+      const done = await S("add track", async () => {
+        const cnt = await trackCounts(Q());
+        if (cnt.v >= nV && cnt.a >= nA) return true;
+        if (cnt.v < nV) transact(P(), "Syncu: add video track", () => [insertAction(Q(), vItem(), 0, cnt.v, cnt.a)]);
+        else transact(P(), "Syncu: add audio track", () => [insertAction(Q(), aItem(), 0, cnt.v, cnt.a)]);
+        const n = await trackCounts(Q());
+        if (n.v === cnt.v && n.a === cnt.a) {
+          log("warn", `could not add tracks (stuck at V${cnt.v}/A${cnt.a}, wanted V${nV}/A${nA})`);
+          return true;
+        }
+        return false;
+      });
+      if (done) break;
     }
-    await removeItems(proj, seq, await allTrackItems(seq), "Syncu: clear helper clips");
-    const c = await trackCounts(seq);
-    log(`tracks ready: V${c.v} A${c.a} (wanted V${nV} A${nA})`);
-    return c;
+    await S("clear helper clips", async () => removeItems(P(), Q(), await allTrackItems(Q()), "Syncu: clear helper clips"));
+    const cnt = await S("count tracks", () => trackCounts(Q()));
+    log(`tracks ready: V${cnt.v} A${cnt.a} (wanted V${nV} A${nA})`);
+    return cnt;
   }
 
   // New, empty sequence matching a clip's settings. Premiere puts that clip
   // at 0 on V1/A1; it is removed so placement starts from a clean slate.
-  async function createSequence(proj, name, settingsItem, bin) {
+  // clear=false leaves the template clip for the caller to remove (so a
+  // retry of that removal can't create a second sequence).
+  async function createSequence(proj, name, settingsItem, bin, clear = true) {
     const clip = ppro.ClipProjectItem.cast(settingsItem);
     const seq = bin
       ? await proj.createSequenceFromMedia(name, [clip], bin)
       : await proj.createSequenceFromMedia(name, [clip]);
     if (!seq) throw new Error("Could not create sequence " + name);
-    await removeItems(proj, seq, await allTrackItems(seq), "Syncu: clear template clip");
+    if (clear) await removeItems(proj, seq, await allTrackItems(seq), "Syncu: clear template clip");
     log(`created sequence "${name}" (timebase ${await seq.getTimebase()} ticks/frame)`);
     return seq;
   }
@@ -382,29 +463,64 @@ Syncu.pp = (() => {
   // with the leftover fraction of a frame as the clone's time offset. If
   // clones snap too, nudge with a sub-frame move. Returns the remaining
   // error in seconds (0 = sample accurate).
-  async function placeAudioExact(proj, seq, projectItem, srcIn, srcOut, pos, track, stagingTrack, fullLength) {
+  // `c` (optional, from a build context) supplies the current project,
+  // sequence and clip on every use plus a retrying `step`; each step below
+  // makes at most one edit and is safe to repeat, so an invalidated object
+  // costs one retried step, not the whole placement.
+  async function placeAudioExact(proj, seq, projectItem, srcIn, srcOut, pos, track, stagingTrack, fullLength, c) {
+    c = c || { proj, seq, item: () => projectItem, step: (l, f) => f() };
+    const S = c.step, P = () => c.proj, Q = () => c.seq, I = () => c.item();
     const wantZero = pos - srcIn;
+    const tol = 0.5 / 48000;
+    const staging = () => trackItemsOn(Q(), "audio", stagingTrack);
+    const clearStaging = () => S("clear staging", async () => {
+      const left = await staging();
+      if (left.length) await removeItems(P(), Q(), left, "Syncu: clear staging");
+    });
+    const placedNear = async () => {
+      const p = await findPlaced(Q(), track, I(), pos);
+      return p && Math.abs(seconds(await p.getStartTime()) - pos) < 0.05 ? p : null;
+    };
+
+    await clearStaging(); // a retried attempt may have left a clip there
+    // A copy already on the target (from an interrupted attempt) is redone.
+    await S("clear partial placement", async () => {
+      const dup = await placedNear();
+      if (dup) await removeItems(P(), Q(), [dup], "Syncu: remove partial placement");
+    });
     // A trimmed piece's clip start can fall before 0 (in-point later than its
     // position): stage it at 0 and let the clone offset move it.
-    transact(proj, "Syncu: stage audio", () => [overwriteAction(seq, projectItem, Math.max(0, wantZero), 0, stagingTrack)]);
-    const staged = await trackItemsOn(seq, "audio", stagingTrack);
-    if (staged.length !== 1) throw new Error(`staging track A${stagingTrack + 1} has ${staged.length} items (expected 1)`);
-    let ti = staged[0];
-    if (!fullLength) {
-      transact(proj, "Syncu: trim audio", () => [ti.createSetInPointAction(ticks(srcIn)), ti.createSetOutPointAction(ticks(srcOut))]);
-      ti = (await trackItemsOn(seq, "audio", stagingTrack))[0];
-    }
-    const stagedErr = (await zeroOf(ti)) - wantZero; // what Premiere's snapping did
-    const editor = ppro.SequenceEditor.getEditor(seq);
-    transact(proj, "Syncu: place audio", () => [
-      editor.createCloneTrackItemAction(ti, ticksRel(-stagedErr), 0, track - stagingTrack, false, false),
-    ]);
-    await removeItems(proj, seq, [ti], "Syncu: clear staging");
+    await S("stage audio", async () => {
+      if ((await staging()).length) return; // already staged
+      transact(P(), "Syncu: stage audio", () => [overwriteAction(Q(), I(), Math.max(0, wantZero), 0, stagingTrack)]);
+    });
+    if (!fullLength)
+      await S("trim audio", async () => {
+        const ti = (await staging())[0];
+        if (!ti) throw new Error(`staging track A${stagingTrack + 1} is empty`);
+        transact(P(), "Syncu: trim audio", () => [ti.createSetInPointAction(ticks(srcIn)), ti.createSetOutPointAction(ticks(srcOut))]);
+      });
+    const stagedErr = await S("measure staged audio", async () => {
+      const st = await staging();
+      if (st.length !== 1) throw new Error(`staging track A${stagingTrack + 1} has ${st.length} items (expected 1)`);
+      return (await zeroOf(st[0])) - wantZero; // what Premiere's snapping did
+    });
+    await S("place audio", async () => {
+      if (await placedNear()) return; // the clone already happened
+      const ti = (await staging())[0];
+      const editor = ppro.SequenceEditor.getEditor(Q());
+      transact(P(), "Syncu: place audio", () => [
+        editor.createCloneTrackItemAction(ti, ticksRel(-stagedErr), 0, track - stagingTrack, false, false),
+      ]);
+    });
+    await clearStaging();
 
-    let placed = await findPlaced(seq, track, projectItem, pos);
-    if (!placed) throw new Error(`audio clip not found on A${track + 1} after placing`);
-    let err = (await zeroOf(placed)) - wantZero;
-    const tol = 0.5 / 48000;
+    const measure = () => S("verify audio", async () => {
+      const p = await findPlaced(Q(), track, I(), pos);
+      if (!p) throw new Error(`audio clip not found on A${track + 1} after placing`);
+      return (await zeroOf(p)) - wantZero;
+    });
+    let err = await measure();
     if (Math.abs(err) <= tol) {
       if (!subFrame.method && Math.abs(stagedErr) > tol) {
         subFrame.method = "clone offset";
@@ -415,9 +531,12 @@ Syncu.pp = (() => {
     // Clone snapped as well: try a sub-frame move on the placed clip.
     if (subFrame.method !== "none") {
       try {
-        transact(proj, "Syncu: nudge audio", () => [placed.createMoveAction(ticksRel(-err))]);
-        placed = await findPlaced(seq, track, projectItem, pos);
-        const err2 = (await zeroOf(placed)) - wantZero;
+        await S("nudge audio", async () => {
+          const p = await findPlaced(Q(), track, I(), pos);
+          const e = (await zeroOf(p)) - wantZero; // re-measured, so a retry can't double the move
+          if (Math.abs(e) > tol) transact(P(), "Syncu: nudge audio", () => [p.createMoveAction(ticksRel(-e))]);
+        });
+        const err2 = await measure();
         if (Math.abs(err2) <= tol) {
           if (subFrame.method !== "move") log("sub-frame audio: clone snapped, sub-frame move works");
           subFrame.method = "move";
@@ -425,6 +544,7 @@ Syncu.pp = (() => {
         }
         err = err2;
       } catch (e) {
+        if (isStale(e)) throw e;
         log("warn", `sub-frame move failed: ${Syncu.log.errText(e)}`);
       }
       if (subFrame.method !== "none") {
@@ -619,7 +739,7 @@ Syncu.pp = (() => {
   }
 
   return {
-    ppro, ticks, seconds, project, transact, transactInBatches, sleep, itemName, refreshItems, isStale,
+    ppro, ticks, seconds, project, transact, transactInBatches, sleep, itemName, refreshItems, isStale, buildContext, findPlaced,
     selectedClips, timelineClips, ensureBin, createSequence, allTrackItems, ensureTracks,
     removeItems, overwriteAction, trackItemsOn, placeAudioPiece, placeAudioExact, muteAudioTrack, addMarkers,
     subFrame, zeroOf,
