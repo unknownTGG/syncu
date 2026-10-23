@@ -56,6 +56,12 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
   let gen = 0;
   let invalidateEvery = 0;
   let txCount = 0;
+  // Busy spells: after every `busyEvery` transactions, every use of any
+  // handle (even a freshly fetched one) fails for `busyMs`. A poisoned clip
+  // is always rejected when an edit uses it.
+  let busyEvery = 0, busyMs = 0, busyUntil = 0, busySpells = 0;
+  let poisoned = null;
+  const busy = () => Date.now() < busyUntil;
   const handleInfo = new WeakMap(); // proxy -> { target, gen }
   const handleCache = new WeakMap(); // target -> { gen, proxy }
   const STALE = "The script object is no longer valid.";
@@ -66,7 +72,7 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
     const myGen = gen;
     const proxy = new Proxy(target, {
       get(t, prop) {
-        if (myGen !== gen) throw new Error(STALE);
+        if (myGen !== gen || busy()) throw new Error(STALE);
         const v = t[prop];
         return typeof v === "function" ? v.bind(proxy) : v;
       },
@@ -78,7 +84,8 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
   function unwrap(x) {
     const i = x && handleInfo.get(x);
     if (!i) return x;
-    if (i.gen !== gen) throw new Error(STALE);
+    if (i.gen !== gen || busy()) throw new Error(STALE);
+    if (poisoned && i.target.name === poisoned) throw new Error(STALE);
     return i.target;
   }
 
@@ -307,6 +314,7 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
       for (const a of actions) a.run();
       actionLog.push(`${label} (${actions.length})`);
       if (invalidateEvery && ++txCount % invalidateEvery === 0) gen++;
+      if (busyEvery && actionLog.length % busyEvery === 0) (busyUntil = Date.now() + busyMs), busySpells++;
       return true;
     },
     async getRootItem() {
@@ -432,6 +440,15 @@ function createMock({ media, frameTicks = 10594584000, subFrame = "clone" }) {
       txCount = 0;
     },
     staleGenerations: () => gen,
+    setBusySpells: (every, ms) => {
+      busyEvery = every;
+      busyMs = ms;
+      busyUntil = 0;
+    },
+    busySpells: () => busySpells,
+    setPoisoned: (name) => {
+      poisoned = name;
+    },
   };
 }
 

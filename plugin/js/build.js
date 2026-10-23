@@ -413,6 +413,11 @@ Syncu.build = (() => {
     ctx.binName = `Syncu ${stamp}`;
     ctx.bin = await pp.ensureBin(ctx.proj, ctx.binName);
     const made = []; // {id, name} of finished sequences, for the master
+    made.skipped = []; // clips Premiere kept rejecting; the rest still gets built
+    const skip = (p, e) => {
+      made.skipped.push(p.name);
+      log("error", `${p.name}: not placed - Premiere kept rejecting it (${Syncu.log.errText(e).split("\n")[0]}); place it by hand`);
+    };
     let step = 0;
     const total = plan.sequences.reduce((n, s) => n + s.placements.length, 0) || 1;
 
@@ -467,7 +472,7 @@ Syncu.build = (() => {
         p.kind === "av"
           ? pp.overwriteAction(ctx.seq, item(p.clipId), p.pos, p.videoTrack, p.audioTrack)
           : pp.overwriteAction(ctx.seq, item(p.clipId), p.pos - p.srcIn, 0, p.audioTrack),
-      15, ctx.step);
+      15, ctx.step, { pause: 120, nameOf: (p) => p.name, onSkip: skip });
       step += simple.length;
       if (onStep) onStep(step / total, sp.name);
 
@@ -490,10 +495,15 @@ Syncu.build = (() => {
       for (const p of audioExact) {
         log("debug", `placing ${p.name} on A${p.audioTrack + 1} at ${p.pos.toFixed(6)}`);
         await Syncu.log.flush();
-        const err = await pp.placeAudioExact(null, null, null, p.srcIn, p.srcOut, p.pos, p.audioTrack, sp.stagingTrack, p.whole,
-          { get proj() { return ctx.proj; }, get seq() { return ctx.seq; }, item: () => item(p.clipId),
-            step: (label, fn) => ctx.step(`${p.name}: ${label}`, fn) });
-        worst = Math.max(worst, Math.abs(err));
+        try {
+          const err = await pp.placeAudioExact(null, null, null, p.srcIn, p.srcOut, p.pos, p.audioTrack, sp.stagingTrack, p.whole,
+            { get proj() { return ctx.proj; }, get seq() { return ctx.seq; }, item: () => item(p.clipId),
+              step: (label, fn) => ctx.step(`${p.name}: ${label}`, fn) });
+          worst = Math.max(worst, Math.abs(err));
+        } catch (e) {
+          if (!pp.isStale(e)) throw e;
+          skip(p, e);
+        }
         await pp.sleep(20);
         step++;
         if (onStep) onStep(step / total, sp.name);

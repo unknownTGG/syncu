@@ -399,7 +399,10 @@ window.Syncu = window.Syncu || {};
     setProgress(0, "Building");
     // Invalidated Premiere objects are recovered step by step inside the
     // build; never start it over (that left extra half-built sequences).
-    await Syncu.build.executePlan(plan, state.clips, (f, m) => setProgress(f, m), makePlan);
+    const made = await Syncu.build.executePlan(plan, state.clips, (f, m) => setProgress(f, m), makePlan);
+    const skipped = (made && made.skipped) || [];
+    if (skipped.length)
+      $("summary").insertAdjacentHTML("beforeend", `<div class="row warn"><div class="title">${skipped.length} clip(s) couldn't be placed</div><div class="meta">Premiere kept rejecting them; everything else was built. Place by hand: ${esc(skipped.join(", "))}</div></div>`);
     $("summary").insertAdjacentHTML("beforeend", `<div class="row ok"><div class="title">✓ Built ${ctx.lastPlan.sequences.length} sequence(s)</div><div class="meta">Look for the new “Syncu …” bin in the Project panel.</div></div>`);
     $("resultsSub").textContent = "Built";
   }

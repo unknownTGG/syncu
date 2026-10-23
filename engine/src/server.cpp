@@ -39,7 +39,7 @@ namespace syncu {
 
 namespace {
 
-const char* kVersion = "0.1.12";
+const char* kVersion = "0.1.13";
 
 struct Job {
   std::atomic<double> progress{0.0};

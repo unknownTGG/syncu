@@ -170,6 +170,42 @@ async function main() {
     for (const seq of made) verifySequence(`stale${every}`, seq, false);
   }
 
+  // ---- Premiere busy after bursts of edits: even fresh objects fail for a
+  // while (0.1.12 gave up after 3 quick tries and left out Sony + audio) ----
+  w.Syncu.retryScale = 0.02; // 60 s of patience = 1.2 s here
+  {
+    mock.setBusySpells(6, 800); // longer than 0.1.12 waited in all
+    const s0 = mock.busySpells();
+    const before = mock.sequences.length;
+    await click("buildBtn", () => !busy("buildBtn"));
+    mock.setBusySpells(0, 0);
+    const made = mock.sequences.slice(before);
+    const err = [...$("summary").querySelectorAll(".row.err:not(.media), .row.warn")].filter((r) => /couldn't be placed|failed/i.test(r.textContent)).map((r) => r.textContent.trim()).join(" | ");
+    const spells = mock.busySpells() - s0;
+    check("busy spells: built completely without errors", !err && made.length === 1, err || `${made.length} sequence(s)`);
+    check("busy spells: really happened and were waited out", spells >= 2 && /waiting \d+\.\d s, refreshing/.test(w.Syncu.log.lines().join("\n")), `${spells} spell(s)`);
+    for (const seq of made) verifySequence("busy", seq, false);
+  }
+  // ---- One clip Premiere always rejects: skipped, everything else built ----
+  {
+    mock.setPoisoned("gimbal.mp4");
+    const before = mock.sequences.length;
+    await click("buildBtn", () => !busy("buildBtn"));
+    mock.setPoisoned(null);
+    const made = mock.sequences.slice(before);
+    const rows = [...$("summary").querySelectorAll(".row")].map((r) => r.textContent.trim());
+    check("rejected clip: one sequence, build finished", made.length === 1 && rows.some((r) => /Built \d+ sequence/.test(r)), rows.join(" | "));
+    check("rejected clip: named in the summary", rows.some((r) => /1 clip\(s\) couldn't be placed/.test(r) && /gimbal\.mp4/.test(r)), rows.join(" | "));
+    const seq = made[0];
+    if (seq) {
+      const names = new Set([...seq.video, ...seq.audio].flatMap((t) => t.items).map((i) => i.clip.name));
+      check("rejected clip: left out", !names.has("gimbal.mp4"));
+      check("rejected clip: other cameras and recorder audio still placed", names.has("camlong.mp4") && names.has("recdrift.wav"), [...names].join(","));
+      verifySequence("rejected", seq, false);
+    }
+  }
+  w.Syncu.retryScale = 1;
+
   // ---- Opt-in drift cuts: re-analyze and build a synced timeline ----
   $("driftCuts").checked = true;
   await click("analyzeBtn", () => !busy("analyzeBtn"));
@@ -211,9 +247,9 @@ async function main() {
   const biggest = Math.max(0, ...mock.actionLog.map((l) => Number((l.match(/\((\d+)\)$/) || [0, 0])[1])));
   check("no Premiere action has more than 15 edits", biggest <= 15, `largest ${biggest}`);
 
-  const errLines = w.Syncu.log.lines().join("\n").split("\n").filter((l) => l.includes("[error]"));
+  const errLines = w.Syncu.log.lines().join("\n").split("\n").filter((l) => l.includes("[error]") && !/gimbal\.mp4: not placed - Premiere kept rejecting/.test(l));
   check("no errors logged", errLines.length === 0, errLines.slice(0, 5).join(" | "));
-  check("no console errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+  check("no console errors", errors.filter((l) => !/gimbal\.mp4: not placed/.test(l)).length === 0, errors.slice(0, 3).join(" | "));
 
   // ---- Helper stops mid-session: clear error + report says why ----
   helper.kill();

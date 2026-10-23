@@ -52,7 +52,9 @@ Syncu.pp = (() => {
       }
     });
     if (error) {
-      log("error", `${label}: ${Syncu.log.errText(error)}`);
+      // Invalidated objects are retried by the caller, which logs them.
+      if (isStale(error)) log("debug", `${label}: ${Syncu.log.errText(error).split("\n")[0]}`);
+      else log("error", `${label}: ${Syncu.log.errText(error)}`);
       throw error;
     }
     if (!ok) throw new Error(`Premiere rejected "${label}" (${count} actions)`);
@@ -64,16 +66,35 @@ Syncu.pp = (() => {
   // batches, saving the log and letting Premiere settle before each one.
   // `proj` may be a function returning the current project; `step` wraps
   // each batch (a build context retries it with fresh objects).
-  async function transactInBatches(proj, label, items, makeAction, size = 15, step = (l, f) => f()) {
+  async function transactInBatches(proj, label, items, makeAction, size = 15, step = (l, f) => f(), opts = {}) {
+    const run = (name, part) => transact(typeof proj === "function" ? proj() : proj, name, () => part.map(makeAction));
     for (let i = 0; i < items.length; i += size) {
       const part = items.slice(i, i + size);
       const name = `${label} (${i + 1}-${i + part.length} of ${items.length})`;
       log(name);
       await Syncu.log.flush();
-      await step(name, async () => transact(typeof proj === "function" ? proj() : proj, name, () => part.map(makeAction)));
-      await sleep(40);
+      try {
+        await step(name, async () => run(name, part));
+      } catch (e) {
+        if (!opts.onSkip || !isStale(e)) throw e;
+        // One object Premiere keeps rejecting must not stop the build: place
+        // this batch's clips one at a time and skip only the ones that fail.
+        log("warn", `${name}: still failing; placing these ${part.length} clip(s) one at a time`);
+        for (const x of part) {
+          const one = `${label}: ${opts.nameOf ? opts.nameOf(x) : "clip"}`;
+          try {
+            await step(one, async () => run(one, [x]), 20);
+          } catch (e2) {
+            if (!isStale(e2)) throw e2;
+            opts.onSkip(x, e2);
+          }
+          await sleep(40);
+        }
+      }
+      await sleep(opts.pause || 40);
     }
   }
+
 
   // Premiere sometimes invalidates the objects a plugin holds ("The script
   // object is no longer valid") in the middle of a build. A build context
@@ -101,11 +122,23 @@ Syncu.pp = (() => {
           seq = null;
         }
         if (!seq) {
-          for (const s of await ctx.proj.getSequences()) {
+          // By guid first; by name only when there is no guid, and then the
+          // newest one (older same-named sequences come first in the list).
+          const all = await ctx.proj.getSequences();
+          for (const s of all) {
             try {
-              if (s.name === ctx.seqName) seq = s;
+              if (ctx.seqId && s.guid && s.guid.toString() === ctx.seqId) seq = s;
             } catch (e) {
               /* skip */
+            }
+          }
+          if (!seq && !ctx.seqId) {
+            for (const s of all) {
+              try {
+                if (s.name === ctx.seqName) seq = s;
+              } catch (e) {
+                /* skip */
+              }
             }
           }
         }
@@ -126,16 +159,29 @@ Syncu.pp = (() => {
         ctx.seqId = null;
       }
     };
-    // Run fn; if Premiere invalidated something, refresh and run it again.
-    ctx.step = async (label, fn, tries = 3) => {
+    // Run fn; if Premiere invalidated something, wait, refresh and run it
+    // again. After a burst of edits Premiere can reject even freshly fetched
+    // objects for a while (seen on 26.5), so back off gradually for up to
+    // `patience` seconds instead of giving up after a few quick tries.
+    ctx.step = async (label, fn, patience = 60) => {
+      const scale = Syncu.retryScale || 1; // tests shrink the waits
+      let waited = 0;
       for (let attempt = 1; ; attempt++) {
         try {
           return await fn();
         } catch (e) {
-          if (!isStale(e) || attempt >= tries) throw e;
-          log("warn", `${label}: Premiere invalidated an object; refreshing and retrying (${attempt}/${tries - 1})`);
-          await sleep(150 * attempt);
-          await ctx.refresh();
+          if (!isStale(e) || waited >= patience * 1000) throw e;
+          const wait = Math.min(250 * 2 ** (attempt - 1), 15000, Math.max(250, patience * 1000 - waited));
+          log("warn", `${label}: Premiere invalidated an object; waiting ${(wait / 1000).toFixed(1)} s, refreshing and retrying (attempt ${attempt + 1})`);
+          await Syncu.log.flush();
+          await sleep(wait * scale);
+          waited += wait;
+          try {
+            await ctx.refresh();
+          } catch (e2) {
+            if (!isStale(e2)) throw e2;
+            log("warn", `${label}: Premiere is still busy (refresh failed); will retry`);
+          }
         }
       }
     };
