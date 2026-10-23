@@ -286,9 +286,13 @@ async function main() {
     }
     if (mode === "ordered") {
       check(`${tag}: no separate not-synced area`, !seq.markers.some((m) => m.name === "Not synced"));
-      check(`${tag}: each not-synced clip marked in place`, uns.length === 2 &&
-        uns.every((i) => seq.markers.some((m) => m.name === `Not synced: ${i.clip.name}` && Math.abs(m.time - i.start) < 1e-6)),
-        uns.map((i) => `${i.clip.name}@${i.start.toFixed(1)}`).join(" "));
+      const unsV = uns.filter((i) => i.clip.hasVideo), unsA = uns.filter((i) => !i.clip.hasVideo);
+      check(`${tag}: not-synced camera clip marked in place`, unsV.length === 1 &&
+        unsV.every((i) => seq.markers.some((m) => m.name === `Not synced: ${i.clip.name}` && Math.abs(m.time - i.start) < 1e-6)),
+        unsV.map((i) => `${i.clip.name}@${i.start.toFixed(1)}`).join(" "));
+      check(`${tag}: not-synced audio after everything else, marked`, unsA.length === 1 && unsA.every((i) => i.start >= syncedEnd - 1e-6) &&
+        seq.markers.some((m) => m.name === "Not synced audio" && Math.abs(m.time - unsA[0].start) < 0.05),
+        unsA.map((i) => `${i.clip.name}@${i.start.toFixed(1)} (end ${syncedEnd.toFixed(1)})`).join(" "));
       const scenes = seq.markers.filter((m) => /^Scene \d+: /.test(m.name)).map((m) => m.name);
       check(`${tag}: scenes named after camera 1 clips`, scenes.length > 0, scenes.join(", "));
     }

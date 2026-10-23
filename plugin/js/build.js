@@ -240,8 +240,9 @@ Syncu.build = (() => {
 
     if (opts.mode === "timeline" && opts.orderByName) {
       // Everything in Camera 1's file-name order: each synced scene is a
-      // block named after its first Camera 1 clip, each not-synced clip a
-      // block of its own, laid out back to back (no separate area).
+      // block named after its first Camera 1 clip, each not-synced camera
+      // clip a block of its own, laid out back to back. Not-synced audio
+      // has no picture to sit next to, so it goes after everything else.
       const vidTotal = new Map();
       for (const it of [...[...comps.values()].flat(), ...unsynced])
         if (it.isVideo) vidTotal.set(it.clip.device, (vidTotal.get(it.clip.device) || 0) + (it.end - it.start));
@@ -254,7 +255,7 @@ Syncu.build = (() => {
         const vids = items.filter((i) => i.isVideo);
         blocks.push({ key: firstName(own.length ? own : vids.length ? vids : items), items, synced: true, cam1: own.length > 0 });
       }
-      for (const it of unsynced)
+      for (const it of unsynced.filter((u) => u.isVideo))
         blocks.push({ key: it.clip.name, items: [{ ...it, segs: it.segs.map((sg) => ({ ...sg, pos: sg.pos - it.start })), vpos: it.vpos === null ? null : it.vpos - it.start, end: it.end - it.start, start: 0 }], synced: false, cam1: it.isVideo && it.clip.device === cam1 });
       blocks.sort((a, b) => nameCompare(a.key, b.key) || (b.cam1 - a.cam1) || (b.synced - a.synced));
 
@@ -277,6 +278,15 @@ Syncu.build = (() => {
           ? { name: `Scene ${++sceneNo}: ${b.key}`, time: start + off, comment: "" }
           : { name: `Not synced: ${b.key}`, time: start + off, comment: "Syncu couldn't sync this clip — place by hand" });
         cursor = ceilFrame(Math.max(...b.items.map((i) => i.end)) + off + gap, frameTicks);
+      }
+      const looseAudio = unsynced.filter((u) => !u.isVideo).sort((a, b) => nameCompare(a.clip.name, b.clip.name));
+      if (looseAudio.length) {
+        marks.push({ name: "Not synced audio", time: cursor, comment: `${looseAudio.length} audio clip(s) Syncu couldn't sync — place by hand` });
+        for (const it of looseAudio) {
+          const at = ceilFrame(cursor, frameTicks), len = it.end - it.start;
+          shifted.push({ ...it, vpos: null, segs: it.segs.map((sg) => ({ ...sg, pos: sg.pos - it.start + at })), start: at, end: at + len });
+          cursor = at + len + 2;
+        }
       }
       const seqPlan = makeSequence(`${label} - synced`, shifted, 0);
       seqPlan.markers.push(...marks);
@@ -524,7 +534,7 @@ Syncu.build = (() => {
         const marks = sp.markers || [];
         for (let i = 0; i < marks.length; i += 15) {
           const part = marks.slice(i, i + 15);
-          await ctx.step("markers", async () => {
+          await ctx.step(`markers (${i + 1}-${i + part.length})`, async () => {
             const m = await pp.ppro.Markers.getMarkers(ctx.seq);
             pp.transact(ctx.proj, `Syncu: markers (${i + 1}-${i + part.length})`, () =>
               part.map((k) => m.createAddMarkerAction(k.name, "Comment", pp.ticks(k.time), pp.ticks(k.duration || 0), k.comment || "")));
