@@ -103,6 +103,7 @@ window.Syncu = window.Syncu || {};
       source: radio("source", "bins"),
       output: radio("output", "timeline"),
       muteScratch: !!$("muteScratch").checked,
+      orderByName: !!$("orderByName").checked,
       driftCuts: !!$("driftCuts").checked,
       trimTakes: !!$("trimTakes").checked,
       nameHints: !!$("nameHints").checked,
@@ -386,7 +387,7 @@ window.Syncu = window.Syncu || {};
     Syncu.log(`settings: ${JSON.stringify(st)}`);
     const makePlan = (frameTicks) => {
       const plan = Syncu.build.planBuild(state.clips, state.result, {
-        mode: st.output, frameTicks, muteScratch: st.muteScratch, trimTakes: st.trimTakes,
+        mode: st.output, frameTicks, muteScratch: st.muteScratch, trimTakes: st.trimTakes, orderByName: st.orderByName,
       });
       ctx.lastPlan = plan;
       return plan;

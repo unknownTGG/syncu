@@ -141,6 +141,19 @@ async function main() {
     for (const seq of made) verifySequence(mode, seq, false);
   }
 
+  // ---- Timeline ordered by camera 1 file names ----
+  {
+    $("orderByName").checked = true;
+    const before = mock.sequences.length;
+    w.document.querySelector('input[name="output"][value="timeline"]').checked = true;
+    await click("buildBtn", () => !busy("buildBtn"));
+    $("orderByName").checked = false;
+    const made = mock.sequences.slice(before);
+    const err = [...$("summary").querySelectorAll(".row.err:not(.media)")].map((r) => r.textContent.trim()).join(" | ");
+    check("ordered by name: built without errors", !err && made.length === 1, err || `${made.length} sequence(s)`);
+    for (const seq of made) verifySequence("ordered", seq, false);
+  }
+
   // ---- Premiere invalidating objects mid-build (seen on real 26.5) ----
   for (const every of [5, 2]) {
     mock.setInvalidateEvery(every);
@@ -234,6 +247,14 @@ async function main() {
     if (mode === "timeline" || mode === "driftcuts") {
       check(`${tag}: not-synced clips placed after the synced material`, uns.length === 2 && uns.every((i) => i.start >= syncedEnd - 1e-6), uns.map((i) => `${i.clip.name}@${i.start.toFixed(1)}`).join(" "));
       check(`${tag}: not-synced area marked`, seq.markers.some((m) => m.name === "Not synced" && m.time >= syncedEnd - 1e-6));
+    }
+    if (mode === "ordered") {
+      check(`${tag}: no separate not-synced area`, !seq.markers.some((m) => m.name === "Not synced"));
+      check(`${tag}: each not-synced clip marked in place`, uns.length === 2 &&
+        uns.every((i) => seq.markers.some((m) => m.name === `Not synced: ${i.clip.name}` && Math.abs(m.time - i.start) < 1e-6)),
+        uns.map((i) => `${i.clip.name}@${i.start.toFixed(1)}`).join(" "));
+      const scenes = seq.markers.filter((m) => /^Scene \d+: /.test(m.name)).map((m) => m.name);
+      check(`${tag}: scenes named after camera 1 clips`, scenes.length > 0, scenes.join(", "));
     }
     const vItems = allV.filter((i) => !isUns(i));
     const aItems = allA.filter((i) => !isUns(i));

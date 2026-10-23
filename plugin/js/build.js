@@ -37,7 +37,24 @@ Syncu.build = (() => {
   }
 
   // clips: [{id, device, group, isVideo, name}] ; result: engine analyze output.
-  // opts: {mode: "timeline"|"multicam"|"takes", frameTicks, gap, handles, muteScratch}
+  // File-name order a person expects: numbers compare as numbers and a
+  // leading "Scene"/"Sc" is ignored, so "Scene 9b Take 2.WAV" sits next to
+  // "09b t2.mov" and "2f1" comes before "10a".
+  function nameCompare(a, b) {
+    const norm = (x) => String(x).toLowerCase().replace(/^\s*(scene|sc)\b[\s_-]*/, "");
+    const tok = (x) => norm(x).match(/\d+|\D+/g) || [];
+    const ta = tok(a), tb = tok(b);
+    for (let i = 0; i < Math.min(ta.length, tb.length); i++) {
+      const x = ta[i], y = tb[i];
+      const nx = /^\d/.test(x), ny = /^\d/.test(y);
+      if (nx && ny && Number(x) !== Number(y)) return Number(x) - Number(y);
+      if (nx !== ny) return nx ? -1 : 1;
+      if (!nx && x !== y) return x < y ? -1 : 1;
+    }
+    return ta.length - tb.length;
+  }
+
+  // opts: {mode: "timeline"|"multicam"|"takes", frameTicks, gap, handles, muteScratch, orderByName}
   function planBuild(clips, result, opts) {
     const frameTicks = opts.frameTicks || TPS / 25;
     const gap = opts.gap ?? 10;
@@ -221,7 +238,50 @@ Syncu.build = (() => {
     const compIds = [...comps.keys()].sort((a, b) => a - b);
     const label = opts.label || "Syncu";
 
-    if (opts.mode === "timeline") {
+    if (opts.mode === "timeline" && opts.orderByName) {
+      // Everything in Camera 1's file-name order: each synced scene is a
+      // block named after its first Camera 1 clip, each not-synced clip a
+      // block of its own, laid out back to back (no separate area).
+      const vidTotal = new Map();
+      for (const it of [...[...comps.values()].flat(), ...unsynced])
+        if (it.isVideo) vidTotal.set(it.clip.device, (vidTotal.get(it.clip.device) || 0) + (it.end - it.start));
+      const cam1 = [...vidTotal.keys()].sort((a, b) => vidTotal.get(b) - vidTotal.get(a))[0];
+      const firstName = (list) => list.map((i) => i.clip.name).sort(nameCompare)[0];
+      const blocks = [];
+      for (const c of compIds) {
+        const items = comps.get(c);
+        const own = items.filter((i) => i.isVideo && i.clip.device === cam1);
+        const vids = items.filter((i) => i.isVideo);
+        blocks.push({ key: firstName(own.length ? own : vids.length ? vids : items), items, synced: true, cam1: own.length > 0 });
+      }
+      for (const it of unsynced)
+        blocks.push({ key: it.clip.name, items: [{ ...it, segs: it.segs.map((sg) => ({ ...sg, pos: sg.pos - it.start })), vpos: it.vpos === null ? null : it.vpos - it.start, end: it.end - it.start, start: 0 }], synced: false, cam1: it.isVideo && it.clip.device === cam1 });
+      blocks.sort((a, b) => nameCompare(a.key, b.key) || (b.cam1 - a.cam1) || (b.synced - a.synced));
+
+      let cursor = 0;
+      const shifted = [];
+      const marks = [];
+      let sceneNo = 0;
+      for (const b of blocks) {
+        const align = frameAlign(b.items);
+        const start = Math.min(...b.items.map((i) => i.start));
+        const off = ceilFrame(cursor - start, frameTicks) + align;
+        for (const it of b.items)
+          shifted.push({
+            ...it,
+            vpos: it.vpos === null ? null : it.vpos + off,
+            segs: it.segs.map((sg) => ({ ...sg, pos: sg.pos + off })),
+            start: it.start + off, end: it.end + off,
+          });
+        marks.push(b.synced
+          ? { name: `Scene ${++sceneNo}: ${b.key}`, time: start + off, comment: "" }
+          : { name: `Not synced: ${b.key}`, time: start + off, comment: "Syncu couldn't sync this clip — place by hand" });
+        cursor = ceilFrame(Math.max(...b.items.map((i) => i.end)) + off + gap, frameTicks);
+      }
+      const seqPlan = makeSequence(`${label} - synced`, shifted, 0);
+      seqPlan.markers.push(...marks);
+      sequences.push(seqPlan);
+    } else if (opts.mode === "timeline") {
       // All scenes in one sequence, back to back with a gap.
       let cursor = 0;
       const all = [];
@@ -493,5 +553,5 @@ Syncu.build = (() => {
     return made;
   }
 
-  return { planBuild, executePlan, validatePlan, snap, ceilFrame };
+  return { planBuild, executePlan, validatePlan, snap, ceilFrame, nameCompare };
 })();

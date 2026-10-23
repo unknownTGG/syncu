@@ -151,6 +151,49 @@ check("unsynced/multicam: separate 'not synced' sequence", mcu.sequences.some((s
   const order = iv.map((x) => x[0]).join(",");
   check("unsynced: cameras one after another, then audio", order === "B1,B2,X,S2R,R", order);
 }
+// Name order: numbers as numbers, "Scene" prefix ignored.
+{
+  const names = ["10a t1.mov", "Scene 9b Take 2.WAV", "2f1 t1.mov", "09b t2.mov", "02a t1.mov", "!BTS01.mov"];
+  const sorted = names.slice().sort(build.nameCompare);
+  check("name order", sorted.join("|") === "02a t1.mov|2f1 t1.mov|09b t2.mov|Scene 9b Take 2.WAV|10a t1.mov|!BTS01.mov", sorted.join(" | "));
+}
+// Order by Camera 1 names: scenes and unsynced clips interleave by name.
+{
+  const cl = [
+    { id: "a1", name: "01a t1.mov", device: "Fuji", isVideo: true },
+    { id: "a2", name: "02a t1.mov", device: "Fuji", isVideo: true },
+    { id: "a3", name: "03a t1.mov", device: "Fuji", isVideo: true },
+    { id: "b1", name: "01a t1.mp4", device: "Sony", isVideo: true },
+    { id: "r1", name: "Scene 1a Take 1.wav", device: "Rec", isVideo: false },
+    { id: "r3", name: "Scene 3a Take 1.wav", device: "Rec", isVideo: false },
+    { id: "r9", name: "Scene 9 Take 1.wav", device: "Rec", isVideo: false },
+  ];
+  const res = { components: 2, clips: [
+    { id: "a3", method: "audio", component: 1, driftPpm: 0, segments: [seg(0, 50, 100)] },
+    { id: "r3", method: "audio", component: 1, driftPpm: 0, segments: [seg(0, 60, 95.5)] },
+    { id: "a1", method: "audio", component: 0, driftPpm: 0, segments: [seg(0, 40, 10)] },
+    { id: "b1", method: "audio", component: 0, driftPpm: 0, segments: [seg(0, 30, 12.25)] },
+    { id: "r1", method: "audio", component: 0, driftPpm: 0, segments: [seg(0, 45, 8.0001)] },
+    { id: "a2", method: "none", component: -1, driftPpm: 0, segments: [], duration: 20, needsReview: true },
+    { id: "r9", method: "none", component: -1, driftPpm: 0, segments: [], duration: 15, needsReview: true },
+  ] };
+  const p = build.planBuild(cl, res, { mode: "timeline", frameTicks: FT, orderByName: true });
+  check("orderByName: one sequence", p.sequences.length === 1);
+  const pl = p.sequences[0].placements;
+  const at = (id) => pl.find((x) => x.clipId === id);
+  const startOf = (id) => at(id).pos;
+  const order = ["a1", "a2", "a3", "r9"].map(startOf);
+  check("orderByName: 01a scene, then unsynced 02a, then 03a scene, then unsynced Scene 9", order.every((t, i) => !i || t > order[i - 1]), order.map((t) => t.toFixed(1)).join(" < "));
+  check("orderByName: no 'Not synced' area marker", !p.sequences[0].markers.some((m) => m.name === "Not synced"));
+  check("orderByName: unsynced clips marked where they are", p.sequences[0].markers.some((m) => m.name === "Not synced: 02a t1.mov" && Math.abs(m.time - startOf("a2")) < 1e-6));
+  const relB = at("b1").pos - at("a1").pos;
+  check("orderByName: sync kept inside a scene", Math.abs(relB - 2.25) < FT / TPS, relB.toFixed(4));
+  const relR = at("r1").pos - at("a1").pos;
+  check("orderByName: recorder sync kept", Math.abs(relR - (8.0001 - 10)) < 1e-6, relR.toFixed(6));
+  // Blocks don't overlap: each starts after the previous one ends.
+  const a2end = startOf("a2") + 20;
+  check("orderByName: unsynced block clear of next scene", Math.min(startOf("a3"), at("r3").pos) >= a2end, `${a2end.toFixed(1)} vs ${Math.min(startOf("a3"), at("r3").pos).toFixed(1)}`);
+}
 const nothing = build.planBuild(clips, { components: 0, clips: [{ id: "X", method: "none", component: -1, driftPpm: 0, segments: [], duration: 30 }] }, { mode: "timeline", frameTicks: FT });
 check("unsynced: builds even when nothing synced", nothing.sequences.length === 1 && nothing.sequences[0].placements.length === 1);
 
